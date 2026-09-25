@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 try:
@@ -25,10 +26,18 @@ class Settings:
     telegram_group_ids: tuple[int, ...]
     tdlib_database_dir: Path
     raw_data_dir: Path
+    request_delay_seconds: float
+    crawl_until_timestamp: int | None
 
 
 def _group_ids(value: str) -> tuple[int, ...]:
     return tuple(int(item.strip()) for item in value.split(",") if item.strip())
+
+
+def _timestamp(value: str) -> int | None:
+    if not value.strip():
+        return None
+    return int(datetime.fromisoformat(value).replace(tzinfo=UTC).timestamp())
 
 
 def _settings() -> Settings:
@@ -39,6 +48,8 @@ def _settings() -> Settings:
         telegram_group_ids=_group_ids(os.getenv("TELEGRAM_GROUP_IDS", "")),
         tdlib_database_dir=Path(os.getenv("TDLIB_DATABASE_DIR", str(PROJECT_ROOT / "data" / "tdlib"))),
         raw_data_dir=Path(os.getenv("RAW_DATA_DIR", str(PROJECT_ROOT / "data" / "raw"))),
+        request_delay_seconds=float(os.getenv("REQUEST_DELAY_SECONDS", "1.0")),
+        crawl_until_timestamp=_timestamp(os.getenv("CRAWL_UNTIL_DATE", "2021-01-01")),
     )
 
 

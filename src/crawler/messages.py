@@ -12,6 +12,13 @@ class MessageRecord:
     chat_id: int
     text: str
     date: int | None = None
+    message_user_id: int | None = None
+    reply_to_message_id: int | None = None
+    edit_date: int | None = None
+    views: int | None = None
+    forwards: int | None = None
+    media_type: str = ""
+    raw_message_json: str = ""
 
 
 def extract_text(message: dict[str, Any]) -> str:
@@ -30,4 +37,11 @@ def normalize_message(message: dict[str, Any]) -> MessageRecord:
         chat_id=int(message.get("chat_id", 0)),
         text=extract_text(message),
         date=message.get("date"),
+        message_user_id=message.get("message_user_id"),
+        reply_to_message_id=message.get("reply_to_message_id"),
+        edit_date=message.get("edit_date"),
+        views=message.get("views"),
+        forwards=message.get("forwards"),
+        media_type=str(message.get("media_type", "")),
+        raw_message_json=str(message.get("raw_message_json", "")),
     )
