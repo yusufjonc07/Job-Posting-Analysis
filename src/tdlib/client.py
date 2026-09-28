@@ -24,11 +24,22 @@ class TdlibClient:
             raise ValueError("TELEGRAM_PHONE_NUMBER must not be empty")
         self._client.start(phone=self._phone_number)
 
+    async def start_async(self) -> None:
+        """Start the client from an already-running asyncio event loop."""
+        if not self._phone_number.strip():
+            raise ValueError("TELEGRAM_PHONE_NUMBER must not be empty")
+        await self._client.start(phone=self._phone_number)
+
     def iter_joined_group_ids(self) -> Iterator[int]:
         """Yield IDs for all groups and supergroups joined by the account."""
         for dialog in self._client.iter_dialogs():
             if dialog.is_group:
                 yield dialog.id
+
+    async def joined_group_ids_async(self) -> list[int]:
+        """Return joined group IDs from an already-running asyncio loop."""
+        dialogs = await self._client.get_dialogs()
+        return [dialog.id for dialog in dialogs if dialog.is_group]
 
     def iter_target_group_ids(self, configured_ids: tuple[int, ...]) -> Iterator[int]:
         """Use configured groups, or discover every joined group when unset."""
@@ -41,6 +52,15 @@ class TdlibClient:
         """Return a human-readable title for a group ID."""
         entity = self._client.get_entity(chat_id)
         return str(getattr(entity, "title", None) or getattr(entity, "first_name", None) or chat_id)
+
+    async def get_group_title_async(self, chat_id: int) -> str:
+        """Return a group title from an already-running asyncio loop."""
+        entity = await self._client.get_entity(chat_id)
+        return str(getattr(entity, "title", None) or getattr(entity, "first_name", None) or chat_id)
+
+    async def close_async(self) -> None:
+        """Close the client from an already-running asyncio event loop."""
+        await self._client.disconnect()
 
     def iter_messages(
         self, chat_id: int, limit: int | None = None, min_id: int = 0
