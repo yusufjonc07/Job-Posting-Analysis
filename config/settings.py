@@ -24,6 +24,8 @@ class Settings:
     telegram_api_hash: str
     telegram_phone_number: str
     telegram_group_ids: tuple[int, ...]
+    source_group_id: int | None
+    source_group_title: str
     tdlib_database_dir: Path
     raw_data_dir: Path
     request_delay_seconds: float
@@ -40,16 +42,22 @@ def _timestamp(value: str) -> int | None:
     return int(datetime.fromisoformat(value).replace(tzinfo=UTC).timestamp())
 
 
+def _optional_int(value: str) -> int | None:
+    return int(value) if value.strip() else None
+
+
 def _settings() -> Settings:
     return Settings(
         telegram_api_id=int(os.getenv("TELEGRAM_API_ID", "0")),
         telegram_api_hash=os.getenv("TELEGRAM_API_HASH", ""),
         telegram_phone_number=os.getenv("TELEGRAM_PHONE_NUMBER", ""),
         telegram_group_ids=_group_ids(os.getenv("TELEGRAM_GROUP_IDS", "")),
+        source_group_id=_optional_int(os.getenv("TELEGRAM_SOURCE_GROUP_ID", "")),
+        source_group_title=os.getenv("TELEGRAM_SOURCE_GROUP_TITLE", "Ish e'lonlari"),
         tdlib_database_dir=Path(os.getenv("TDLIB_DATABASE_DIR", str(PROJECT_ROOT / "data" / "tdlib"))),
         raw_data_dir=Path(os.getenv("RAW_DATA_DIR", str(PROJECT_ROOT / "data" / "raw"))),
         request_delay_seconds=float(os.getenv("REQUEST_DELAY_SECONDS", "1.0")),
-        crawl_until_timestamp=_timestamp(os.getenv("CRAWL_UNTIL_DATE", "2021-01-01")),
+        crawl_until_timestamp=_timestamp(os.getenv("CRAWL_UNTIL_DATE", "2025-01-01")),
     )
 
 

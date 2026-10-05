@@ -1,6 +1,7 @@
 """Helpers for turning Telegram message payloads into text records."""
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 
@@ -45,3 +46,39 @@ def normalize_message(message: dict[str, Any]) -> MessageRecord:
         media_type=str(message.get("media_type", "")),
         raw_message_json=str(message.get("raw_message_json", "")),
     )
+
+
+def extract_referenced_group_name(text: str) -> str | None:
+    """Extract the destination group from a structured Ish e'lonlari post."""
+    match = re.search(r"(?im)^\s*\*{0,2}Guruh\*{0,2}\s*:\s*\*{0,2}(.+?)\*{0,2}\s*$", text)
+    if not match:
+        return None
+    group_name = re.sub(r"\s+", " ", match.group(1)).strip(" *")
+    return group_name or None
+
+
+def extract_referenced_group_link(message: dict[str, Any]) -> str | None:
+    """Extract the URL entity attached to the structured Guruh field."""
+    text = str(message.get("message", ""))
+    group_match = re.search(r"(?im)^\s*\*{0,2}Guruh\*{0,2}\s*:", text)
+    if not group_match:
+        return None
+
+    start_utf16 = len(text[:group_match.start()].encode("utf-16-le")) // 2
+    end_utf16 = len(text[:text.find("\n", group_match.start()) if "\n" in text[group_match.start():] else len(text)].encode("utf-16-le")) // 2
+    for entity in message.get("entities", ()) or ():
+        offset = int(entity.get("offset", 0))
+        length = int(entity.get("length", 0))
+        if offset >= end_utf16 or offset + length <= start_utf16:
+            continue
+        link = entity.get("url")
+        if link:
+            return str(link)
+    return None
+
+
+def group_filename(group_name: str) -> str:
+    """Create a stable filesystem-safe name from a referenced group title."""
+    safe_name = re.sub(r"[^\w\s-]", "", group_name, flags=re.UNICODE)
+    safe_name = re.sub(r"[\s-]+", "_", safe_name).strip("_")
+    return (safe_name or "unknown_group")[:100]

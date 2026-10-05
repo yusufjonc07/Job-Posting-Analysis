@@ -29,6 +29,29 @@ def append_messages_jsonl(path: Path, messages: Iterable[MessageRecord]) -> int:
     return count
 
 
+def append_message_jsonl(path: Path, message: MessageRecord) -> None:
+    """Append one complete raw Telegram object and flush it immediately."""
+    append_messages_jsonl(path, [message])
+
+
+def load_checkpoint(path: Path) -> int:
+    """Read the last source message ID processed by the routed collector."""
+    if not path.exists():
+        return 0
+    try:
+        return int(json.loads(path.read_text(encoding="utf-8")).get("last_message_id", 0))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return 0
+
+
+def save_checkpoint(path: Path, message_id: int) -> None:
+    """Persist a source checkpoint atomically after a message is stored."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(json.dumps({"last_message_id": message_id}), encoding="utf-8")
+    temporary_path.replace(path)
+
+
 def last_message_id(path: Path) -> int:
     """Return the highest saved Telegram message ID from a JSONL file."""
     if not path.exists():

@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 from datetime import datetime
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ class TdlibClient:
         session_directory.mkdir(parents=True, exist_ok=True)
         self._phone_number = phone_number
         self._client = TelegramClient(str(session_directory / "telegram"), api_id, api_hash)
+        self._resolved_group_links: dict[str, int | None] = {}
 
     def start(self) -> None:
         """Start the client connection."""
@@ -48,10 +50,36 @@ class TdlibClient:
             return
         yield from self.iter_joined_group_ids()
 
+    def iter_group_ids_by_title(self, title: str) -> Iterator[int]:
+        """Yield joined group IDs whose title matches case-insensitively."""
+        expected = title.strip().casefold()
+        for dialog in self._client.iter_dialogs():
+            if dialog.is_group and dialog.name.strip().casefold() == expected:
+                yield dialog.id
+
     def get_group_title(self, chat_id: int) -> str:
         """Return a human-readable title for a group ID."""
         entity = self._client.get_entity(chat_id)
         return str(getattr(entity, "title", None) or getattr(entity, "first_name", None) or chat_id)
+
+    def resolve_group_link(self, link: str | None) -> int | None:
+        """Resolve a public Telegram group link once and cache its chat ID."""
+        if not link:
+            return None
+        if link in self._resolved_group_links:
+            return self._resolved_group_links[link]
+        direct_match = re.search(r"(?:t\.me|telegram\.me)/c/(\d+)", link)
+        if direct_match:
+            chat_id = int(f"-100{direct_match.group(1)}")
+        else:
+            username_match = re.search(r"(?:t\.me|telegram\.me)/([A-Za-z0-9_]+)", link)
+            if not username_match:
+                chat_id = None
+            else:
+                entity = self._client.get_entity(username_match.group(1))
+                chat_id = getattr(entity, "id", None)
+        self._resolved_group_links[link] = chat_id
+        return chat_id
 
     async def get_group_title_async(self, chat_id: int) -> str:
         """Return a group title from an already-running asyncio loop."""
