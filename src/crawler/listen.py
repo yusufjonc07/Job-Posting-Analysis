@@ -22,7 +22,7 @@ import os
 import re
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -39,6 +39,7 @@ POLL_SECONDS = 120
 MIN_POLL_SPACING = 1.0         # never more than one check per second across all polled groups
 BACKFILL_DAYS = 30             # a group without direct history is read back at most this far
 HEARTBEAT_SECONDS = 15
+HOUSEKEEPING_SECONDS = 30      # discovery requests and newly added groups are picked up this often
 STATUS_FILE = "listener.json"
 PROGRESS_EVERY = 500
 # The start of a raw line as Telethon's to_dict writes it: message id, the chat it came from, its date.
@@ -50,7 +51,7 @@ class ListenerClient(Protocol):
 
     disconnected: asyncio.Future
 
-    def on_new_message(self, chat_ids: tuple[int, ...], callback: Callable[[dict[str, Any]], None]) -> None: ...
+    def on_new_message(self, wanted: Callable[[int], bool], callback: Callable[[dict[str, Any]], None]) -> None: ...
     def iter_messages_async(self, chat_id: int, limit: int | None = None, min_id: int = 0) -> Any: ...
     async def resolve_group_link_async(self, link: str | None) -> int | None: ...
 
@@ -271,15 +272,20 @@ async def listen(
     poll_seconds: float = POLL_SECONDS,
     since: dict[int, float] | None = None,
     skipped: int = 0,
+    housekeeping: Callable[[], Awaitable[None]] | None = None,
+    add_groups: Callable[[set[int]], Awaitable[tuple[tuple[int, ...], tuple[int, ...]]]] | None = None,
 ) -> Router:
     """Catch up, then save new messages until `stop` is set; raises ConnectionError when Telegram drops us.
 
     live_ids: groups the account has joined (Telegram pushes their messages);
-    polled_ids: readable groups it has not joined (checked in turn, each about every poll_seconds).
+    polled_ids: readable groups it has not joined (checked in turn, each about every poll_seconds);
+    housekeeping / add_groups: called every HOUSEKEEPING_SECONDS, e.g. to run group discovery and to start
+    following groups added to the list meanwhile (add_groups gets the followed ids, returns new live/polled).
     """
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-    pushed = tuple(source_ids) + tuple(live_ids)
-    client.on_new_message(pushed, queue.put_nowait)  # subscribe first: nothing posted during catch-up is lost
+    pushed: set[int] = set(source_ids) | set(live_ids)
+    # Subscribe first, so nothing posted during catch-up is lost; the set grows as groups are added.
+    client.on_new_message(lambda chat_id: chat_id in pushed, queue.put_nowait)
     router = Router(client, raw_dir, crawl_until, log, tuple(live_ids) + tuple(polled_ids))
     status = StatusFile(raw_dir / ".state" / STATUS_FILE)
     state = "catching_up"
@@ -293,9 +299,10 @@ async def listen(
 
     async def catch_up_groups(group_ids: tuple[int, ...]) -> tuple[int, ...]:
         readable, total = [], 0
+        oldest = time.time() - BACKFILL_DAYS * 86_400
         for group_id in group_ids:
             try:
-                count = await router.catch_up_group(group_id, since.get(group_id))
+                count = await router.catch_up_group(group_id, since.get(group_id, oldest))
             except (ValueError, RPCError) as error:  # private, left, or unknown to Telegram
                 log(f"[{_now()}] Skipping group {group_id}: {error}")
                 router.counts["skipped"] += 1
@@ -304,16 +311,20 @@ async def listen(
             total += count
             if count:
                 log(f"[{_now()}] Caught up group {group_id}: {count} new message(s)")
-        log(f"[{_now()}] Caught up {len(readable)} group(s): {total:,} new message(s)")
+        if group_ids:
+            log(f"[{_now()}] Caught up {len(readable)} group(s): {total:,} new message(s)")
         return tuple(readable)
 
-    async def poller(group_ids: tuple[int, ...]) -> None:
+    polled: list[int] = []
+
+    async def poller() -> None:
         # Telegram does not push messages of groups the account has not joined: ask, one group at a time.
-        if not group_ids:
-            return
-        spacing = max(MIN_POLL_SPACING, poll_seconds / len(group_ids))
         while True:
-            for group_id in group_ids:
+            if not polled:
+                await asyncio.sleep(poll_seconds)
+                continue
+            spacing = max(MIN_POLL_SPACING, poll_seconds / len(polled))
+            for group_id in list(polled):
                 try:
                     await router.poll(group_id)
                 except (ValueError, RPCError) as error:
@@ -322,20 +333,36 @@ async def listen(
                     log(f"[{_now()}] Check of group {group_id} failed unexpectedly: {error!r}")
                 await asyncio.sleep(spacing)
 
+    async def follow_new_groups() -> None:
+        new_live, new_polled = await add_groups(set(router.groups) | set(source_ids))
+        if not new_live and not new_polled:
+            return
+        router.groups |= set(new_live) | set(new_polled)
+        live_ok = await catch_up_groups(tuple(new_live))
+        polled_ok = await catch_up_groups(tuple(new_polled))
+        pushed.update(live_ok)
+        resynced.extend(live_ok)
+        polled.extend(polled_ok)
+        router.counts["live"] += len(live_ok)
+        router.counts["polled"] += len(polled_ok)
+        log(f"[{_now()}] Now also following {len(live_ok)} joined and {len(polled_ok)} other new group(s)")
+
     beating = asyncio.create_task(heartbeat())
     polling: asyncio.Task | None = None
     stop = stop or asyncio.Event()
     stopping = asyncio.ensure_future(stop.wait())
+    resynced: list[int] = list(source_ids)
     try:
         router.counts["skipped"] = skipped
         for source_id in source_ids:
             count = await router.catch_up(source_id)
             log(f"[{_now()}] Caught up {source_id}: {count} new message(s) since the last run")
         live = await catch_up_groups(tuple(live_ids))
-        polled = await catch_up_groups(tuple(polled_ids))
+        polled.extend(await catch_up_groups(tuple(polled_ids)))
+        pushed.difference_update(set(live_ids) - set(live))
+        resynced.extend(live)
         router.counts.update(live=len(live), polled=len(polled))
-        resynced = tuple(source_ids) + live
-        polling = asyncio.create_task(poller(polled))
+        polling = asyncio.create_task(poller())
         state = "listening"
         status.write(state, router)
         log(
@@ -345,9 +372,10 @@ async def listen(
 
         loop = asyncio.get_running_loop()
         next_resync = loop.time() + resync_seconds
+        next_housekeeping = loop.time() + HOUSEKEEPING_SECONDS
         while not stop.is_set():
             getter = asyncio.ensure_future(queue.get())
-            timeout = max(0.0, next_resync - loop.time())
+            timeout = max(0.0, min(next_resync, next_housekeeping) - loop.time())
             done, _ = await asyncio.wait({getter, client.disconnected, stopping}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
             if getter in done:
                 if await router.save(getter.result()):
@@ -356,8 +384,17 @@ async def listen(
                 getter.cancel()
             if client.disconnected in done:
                 raise ConnectionError("lost the connection to Telegram")
+            if loop.time() >= next_housekeeping:
+                try:
+                    if housekeeping:
+                        await housekeeping()
+                    if add_groups:
+                        await follow_new_groups()
+                except (ValueError, RPCError) as error:
+                    log(f"[{_now()}] Housekeeping failed, trying again later: {error}")
+                next_housekeeping = loop.time() + HOUSEKEEPING_SECONDS
             if loop.time() >= next_resync:
-                for chat_id in resynced:
+                for chat_id in list(resynced):
                     try:
                         await router.resync(chat_id)
                     except (ValueError, RPCError) as error:

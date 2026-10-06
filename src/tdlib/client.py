@@ -8,9 +8,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from telethon import events
+from telethon import events, utils
 from telethon.errors import BadRequestError
 from telethon.sync import TelegramClient
+from telethon.tl.types import Channel, Chat
 
 from src.tdlib.cache import LookupCache
 
@@ -143,6 +144,24 @@ class TdlibClient:
                 continue
         return False
 
+    async def resolve_username_async(self, username: str) -> dict[str, Any] | None:
+        """A public group or channel by username: {'id', 'title', 'kind'}; None for a person or a bot.
+
+        One request per username, ever: the answer is kept in the lookup cache (and Telethon's session).
+        """
+        link = f"https://t.me/{username}"
+        if link in self._resolved_group_links and self._resolved_group_links[link] is None:
+            return None
+        entity = await self._client.get_entity(username)
+        if not isinstance(entity, (Channel, Chat)):
+            self._remember_link(link, None)
+            return None
+        chat_id = utils.get_peer_id(entity)
+        self._remember_link(link, entity.id)
+        title = self._remember_title(chat_id, entity)
+        kind = "group" if isinstance(entity, Chat) or getattr(entity, "megagroup", False) else "channel"
+        return {"id": chat_id, "title": title, "kind": kind}
+
     async def group_ids_by_title_async(self, title: str) -> list[int]:
         """Joined group IDs whose title matches case-insensitively, from a running loop."""
         expected = title.strip().casefold()
@@ -230,13 +249,18 @@ class TdlibClient:
         async for message in self._client.iter_messages(chat_id, limit=limit, min_id=min_id):
             yield message_dict(message, chat_id)
 
-    def on_new_message(self, chat_ids: tuple[int, ...], callback: Callable[[dict[str, Any]], None]) -> None:
-        """Call `callback` with every new message Telegram pushes for these chats (no polling)."""
+    def on_new_message(self, wanted: Callable[[int], bool], callback: Callable[[dict[str, Any]], None]) -> None:
+        """Call `callback` with every new message Telegram pushes for a chat `wanted` accepts (no polling).
+
+        A predicate rather than a fixed list, so chats followed later (e.g. found by group discovery) are
+        pushed too.
+        """
 
         async def handler(event: events.NewMessage.Event) -> None:
-            callback(message_dict(event.message, event.chat_id))
+            if event.chat_id is not None and wanted(event.chat_id):
+                callback(message_dict(event.message, event.chat_id))
 
-        self._client.add_event_handler(handler, events.NewMessage(chats=list(chat_ids)))
+        self._client.add_event_handler(handler, events.NewMessage())
 
     def close(self) -> None:
         """Close the client connection."""

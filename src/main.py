@@ -275,6 +275,51 @@ def group_titles() -> dict[int, str]:
         return {int(row["group_id"]): row.get("group_title") or "" for row in csv.DictReader(source) if row.get("group_id")}
 
 
+def listener_hooks(client: TdlibClient, unreadable: list[int]):
+    """The listener's periodic work: group discovery (when asked, or daily) and following newly added groups."""
+    from src.discover_groups import DISCOVER_EVERY_HOURS, STATE_FILE, DiscoveryState, Options, discover, read_request
+
+    raw_dir = settings.raw_data_dir
+    ignored = set(unreadable)
+    running: list[asyncio.Task] = []
+
+    def log(message: str) -> None:
+        print(message, flush=True)
+
+    async def housekeeping() -> None:
+        if running and not running[0].done():
+            return
+        options = read_request(raw_dir)
+        if options is None:
+            if DISCOVER_EVERY_HOURS <= 0:
+                return
+            last_run = DiscoveryState(raw_dir / ".state" / STATE_FILE).last_run
+            if time.time() - last_run < DISCOVER_EVERY_HOURS * 3600:
+                return
+            options = Options()
+        running[:] = [asyncio.create_task(discover(client, raw_dir, GROUPS_CSV, options, log))]  # runs beside the listener
+
+    async def add_groups(followed: set[int]) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        known = settings.telegram_group_ids or known_group_ids(raw_dir, GROUPS_CSV)
+        new = [group_id for group_id in known if group_id not in followed and group_id not in ignored]
+        if not new:
+            return (), ()
+        joined = await client.joined_chat_ids_async()
+        live = tuple(group_id for group_id in new if group_id in joined)
+        polled = []
+        for group_id in new:
+            if group_id in joined:
+                continue
+            if await client.can_read_async(group_id):
+                polled.append(group_id)
+            else:
+                ignored.add(group_id)
+                log(f"  skipped (private, join it to follow): {group_id}")
+        return live, tuple(polled)
+
+    return housekeeping, add_groups
+
+
 async def run_listener(resync_seconds: int, poll_seconds: int = POLL_SECONDS) -> int:
     """Listen until Ctrl+C or a lost connection; never prompts for a login code."""
     client = new_client()
@@ -315,6 +360,7 @@ async def run_listener(resync_seconds: int, poll_seconds: int = POLL_SECONDS) ->
         oldest = time.time() - BACKFILL_DAYS * 86_400
         dates = await asyncio.to_thread(newest_post_dates, settings.raw_data_dir)
         since = {group_id: max(dates.get(group_id, oldest), oldest) for group_id in known}
+        housekeeping, add_groups = listener_hooks(client, unreadable)
         await listen(
             client,
             group_ids,
@@ -326,6 +372,8 @@ async def run_listener(resync_seconds: int, poll_seconds: int = POLL_SECONDS) ->
             poll_seconds=poll_seconds,
             since=since,
             skipped=len(unreadable),
+            housekeeping=housekeeping,
+            add_groups=add_groups,
         )
         return 0
     finally:
