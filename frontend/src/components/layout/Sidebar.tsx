@@ -46,6 +46,9 @@ function ListenerLine({ status, now }: { status: ListenerStatus; now: number }) 
       <span className={clsx('mt-1 size-2 shrink-0 rounded-full', look.dot)} aria-hidden />
       <span>
         {look.text}
+        {status.state === 'catching_up' && (status.catch_up_read ?? 0) > 0 && (
+          <span className="block text-slate-500">{fmtInt(status.catch_up_read ?? 0)} messages read</span>
+        )}
         {status.last_message_at && <span className="block text-slate-500">last post saved {fmtRelative(status.last_message_at, now)}</span>}
       </span>
     </div>

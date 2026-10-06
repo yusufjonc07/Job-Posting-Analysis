@@ -36,7 +36,14 @@ def post(message_id: int, group: str = "Daeso arbayt", link: str | None = LINK) 
     """A forwarded post in the shape TdlibClient yields (same as the crawler tests)."""
     text = f"Zavodga ishchi kerak, post {message_id}\nGuruh: {group}"
     entities = [{"_": "MessageEntityTextUrl", "offset": text.index(group), "length": len(group), "url": link}] if link else []
-    raw = {"_": "Message", "id": message_id, "date": datetime.fromtimestamp(START + message_id, UTC).isoformat(sep=" "), "message": text, "entities": entities}
+    raw = {
+        "_": "Message",
+        "id": message_id,
+        "peer_id": {"_": "PeerChannel", "channel_id": int(str(SOURCE_ID).removeprefix("-100"))},
+        "date": datetime.fromtimestamp(START + message_id, UTC).isoformat(sep=" "),
+        "message": text,
+        "entities": entities,
+    }
     return {
         "id": message_id,
         "chat_id": SOURCE_ID,
@@ -113,6 +120,34 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(load_checkpoint(self.checkpoint), 7)
         self.assertEqual(router.saved, 5)
         self.assertEqual(client.requests[0], (None, 2), "catch-up reads only what is newer than the checkpoint")
+
+    async def test_stale_checkpoint_never_rewrites_stored_messages_but_fills_gaps(self):
+        # An interrupted newest-first crawl stored 3, 4 and 6 but left the checkpoint at 2.
+        self.raw.mkdir(parents=True)
+        with (self.raw / LINKED_FILE).open("w", encoding="utf-8") as target:
+            for message_id in (6, 4, 3):
+                target.write(json.dumps(json.loads(post(message_id)["raw_message_json"]), ensure_ascii=False) + "\n")
+        save_checkpoint(self.checkpoint, 2)
+        client = FakeTelegram([post(i) for i in range(1, 8)])
+
+        async def script(stop):
+            await asyncio.sleep(0.05)
+
+        router = await self.run_listener(client, script)
+        self.assertEqual(self.stored(), [6, 4, 3, 5, 7], "only the gap (5) and the new message (7) are written")
+        self.assertEqual(router.saved, 2)
+        self.assertEqual(load_checkpoint(self.checkpoint), 7, "the stale checkpoint is repaired")
+
+    async def test_heartbeat_reports_catch_up_progress(self):
+        client = FakeTelegram([post(i) for i in range(1, 4)])
+        status_path = self.raw / ".state" / STATUS_FILE
+
+        async def script(stop):
+            await asyncio.sleep(0.05)
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual((status["state"], status["catch_up_read"], status["messages_saved"]), ("listening", 3, 3))
+
+        await self.run_listener(client, script)
 
     async def test_recheck_writes_missed_messages_only(self):
         save_checkpoint(self.checkpoint, 3)

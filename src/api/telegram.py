@@ -83,6 +83,7 @@ class ListenerSupervisor:
             "managed": self.enabled,
             "restarts": self.restarts,
             "messages_saved": int(heartbeat.get("messages_saved", 0)) if heartbeat else 0,
+            "catch_up_read": int(heartbeat.get("catch_up_read", 0)) if heartbeat else 0,
             "last_message_at": iso(heartbeat.get("last_message_at")) if heartbeat else None,
         }
 
