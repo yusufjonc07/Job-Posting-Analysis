@@ -14,6 +14,7 @@ export const queryClient = new QueryClient({
 /** Every stats query key starts with 'stats' so one invalidate refreshes them all on a live update. */
 export const queryKeys = {
   health: ['health'] as const,
+  auth: ['auth'] as const,
   stats: ['stats'] as const,
   meta: ['stats', 'meta'] as const,
   overview: (f: Filters) => ['stats', 'overview', f] as const,

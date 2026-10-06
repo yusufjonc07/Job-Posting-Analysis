@@ -3,7 +3,7 @@ import { keepPreviousData, useQuery, type UseQueryResult } from '@tanstack/react
 import { useFilters } from '../state/filters'
 import { ApiError, api, isLoadingError, isNotFoundError, isOfflineError } from './client'
 import { queryKeys } from './queryClient'
-import type { Feed, Groups, Health, Jobs, Locations, Meta, Overview, Pay, Posts, Region } from './types'
+import type { AuthState, Feed, Groups, Health, Jobs, Locations, Meta, Overview, Pay, Posts, Region } from './types'
 
 /** Retry 503 "loading" for as long as the store loads; retry offline/5xx a couple of times; never retry 4xx. */
 function retry(failureCount: number, error: Error): boolean {
@@ -42,6 +42,27 @@ export function useHealth(): UseQueryResult<Health, ApiError> {
   })
 }
 
+/** GET /api/auth/me — whether province and group data need a Telegram login, and who is logged in. */
+export function useAuth(): UseQueryResult<AuthState, ApiError> {
+  return useQuery<AuthState, ApiError>({
+    queryKey: queryKeys.auth,
+    queryFn: ({ signal }) => api.auth.me(signal),
+    staleTime: 60_000,
+    retry: (count, error) => !isOfflineError(error) && count < 2,
+  })
+}
+
+/**
+ * Who may see province and Telegram group data: 'full' (login not required, or logged in and allowed),
+ * 'public' (log in first) or 'unknown' (still asking the server).
+ */
+export function useAccess(): 'full' | 'public' | 'unknown' {
+  const auth = useAuth()
+  if (!auth.data) return auth.isError ? 'public' : 'unknown'
+  if (!auth.data.required) return 'full'
+  return auth.data.user && auth.data.allowed ? 'full' : 'public'
+}
+
 /** GET /api/meta — provinces, data range, group count. */
 export function useMeta(): UseQueryResult<Meta, ApiError> {
   return useQuery<Meta, ApiError>({
@@ -63,12 +84,13 @@ export function useOverview(): UseQueryResult<Overview, ApiError> {
 }
 
 /** GET /api/locations with the current filters. */
-export function useLocations(): UseQueryResult<Locations, ApiError> {
+export function useLocations({ enabled = true }: { enabled?: boolean } = {}): UseQueryResult<Locations, ApiError> {
   const { filters } = useFilters()
   return useQuery<Locations, ApiError>({
     queryKey: queryKeys.locations(filters),
     queryFn: ({ signal }) => api.locations(filters, signal),
     ...statsOptions,
+    enabled,
   })
 }
 
@@ -132,11 +154,12 @@ export function usePosts(): UseQueryResult<Posts, ApiError> {
 }
 
 /** GET /api/groups with the current filters. */
-export function useGroups(): UseQueryResult<Groups, ApiError> {
+export function useGroups({ enabled = true }: { enabled?: boolean } = {}): UseQueryResult<Groups, ApiError> {
   const { filters } = useFilters()
   return useQuery<Groups, ApiError>({
     queryKey: queryKeys.groups(filters),
     queryFn: ({ signal }) => api.groups(filters, signal),
     ...statsOptions,
+    enabled,
   })
 }

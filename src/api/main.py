@@ -27,7 +27,6 @@ from src.api.auth import (
     DeepLinkLogins,
     describe,
     is_allowed,
-    public_event,
     public_view,
     read_session,
     sign_session,
@@ -146,7 +145,7 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
         thread.start()
         listener.start()
         if auth.require_login and not auth.enabled:
-            log.warning("Province and group data need a Telegram login, but no bot is set up: add TELEGRAM_BOT_TOKEN and "
+            log.warning("Telegram group details need a Telegram login, but no bot is set up: add TELEGRAM_BOT_TOKEN and "
                         "TELEGRAM_BOT_USERNAME to .env (or DASHBOARD_REQUIRE_LOGIN=0 to show everything without login)")
         if not config.telegram_listener:
             log.info("Telegram listener off (API_TELEGRAM_LISTENER=0): new posts appear when a crawler writes them")
@@ -191,7 +190,7 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
         return read_session(request.cookies.get(COOKIE), auth.secret)
 
     def full_access(request: Request) -> bool:
-        """Province and group data: for everyone when login is not required, else for allowed logged-in users."""
+        """Telegram group details: for everyone when login is not required, else for allowed logged-in users."""
         return not auth.require_login or is_allowed(session_user(request), auth)
 
     def require_full_access(request: Request) -> None:
@@ -235,8 +234,8 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
 
     @app.get("/api/regions/{province}")
     def region(request: Request, province: Annotated[str, Depends(province_id)], current: Ready, chosen: Filtered) -> dict:
-        require_full_access(request)
-        return cached("region", current, lambda moment: stats.region(current, chosen, moment, province), chosen, province)
+        data = cached("region", current, lambda moment: stats.region(current, chosen, moment, province), chosen, province)
+        return data if full_access(request) else public_view("region", data)
 
     @app.get("/api/feed")
     def feed(
@@ -248,7 +247,6 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
     ) -> dict:
         if province is not None:
             province_id(province)
-            require_full_access(request)
         data = cached("feed", current, lambda moment: stats.feed(current, chosen, moment, limit, province),
                       chosen, limit, province)
         return data if full_access(request) else public_view("feed", data)
@@ -293,10 +291,10 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
         return describe(auth, None)
 
     @app.get("/api/events")
-    async def events(request: Request) -> StreamingResponse:
+    async def events() -> StreamingResponse:
         hello = lambda: {"version": store.snapshot.version, "status": store.status}  # noqa: E731
         return StreamingResponse(
-            broadcaster.stream(hello, view=None if full_access(request) else public_event),
+            broadcaster.stream(hello),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

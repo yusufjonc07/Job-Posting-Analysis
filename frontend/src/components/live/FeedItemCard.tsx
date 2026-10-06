@@ -1,6 +1,6 @@
 // One ad in a feed: group, time ago, place / salary chips, excerpt, occupation and visa tags, repost info.
 import clsx from 'clsx'
-import { Forward, MapPin, Repeat2 } from 'lucide-react'
+import { Forward, Lock, MapPin, Repeat2 } from 'lucide-react'
 import { Link } from 'react-router'
 import type { FeedItem } from '../../api/types'
 import { isProvinceId } from '../../hooks/useSelectedRegion'
@@ -20,9 +20,15 @@ export function FeedItemCard({ item, now, fresh = false }: { item: FeedItem; now
       )}
     >
       <div className="flex items-baseline justify-between gap-2 text-[11px] leading-4">
-        <span className="min-w-0 truncate font-medium text-slate-700" title={item.group_title}>
-          {item.group_title}
-        </span>
+        {item.group_title ? (
+          <span className="min-w-0 truncate font-medium text-slate-700" title={item.group_title}>
+            {item.group_title}
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 text-slate-400" title="Log in with Telegram to see the group">
+            <Lock className="size-3" aria-hidden /> Group hidden
+          </span>
+        )}
         <time dateTime={item.date} title={fmtDate(item.date, 'datetime')} className="shrink-0 text-slate-500 tabular-nums">
           {fmtRelative(item.date, now)}
         </time>

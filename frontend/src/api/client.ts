@@ -1,11 +1,14 @@
 // Typed fetch client for every backend endpoint (spec §4). All paths are relative: /api is proxied in dev.
 import type {
+  AuthState,
   Feed,
   Filters,
   Groups,
   Health,
   Jobs,
   Locations,
+  LoginLink,
+  LoginLinkStatus,
   Meta,
   Overview,
   Pay,
@@ -73,10 +76,23 @@ async function readBody(res: Response): Promise<unknown> {
 }
 
 /** GET a JSON endpoint and throw a classified ApiError on failure. */
-export async function apiGet<T>(path: string, params: Params = {}, signal?: AbortSignal): Promise<T> {
+export function apiGet<T>(path: string, params: Params = {}, signal?: AbortSignal): Promise<T> {
+  return apiRequest<T>(apiUrl(path, params), { signal, headers: { Accept: 'application/json' } })
+}
+
+/** POST JSON (login, logout) and throw a classified ApiError on failure. */
+export function apiPost<T>(path: string, body?: unknown): Promise<T> {
+  return apiRequest<T>(apiUrl(path), {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+}
+
+async function apiRequest<T>(url: string, init: RequestInit): Promise<T> {
   let res: Response
   try {
-    res = await fetch(apiUrl(path, params), { signal, headers: { Accept: 'application/json' } })
+    res = await fetch(url, init)
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') throw e
     throw new ApiError(0, 'offline', 'Backend unreachable')
@@ -110,6 +126,15 @@ export const api = {
   jobs: (f: Filters, signal?: AbortSignal) => apiGet<Jobs>('/jobs', filterParams(f), signal),
   posts: (f: Filters, signal?: AbortSignal) => apiGet<Posts>('/posts', filterParams(f), signal),
   groups: (f: Filters, signal?: AbortSignal) => apiGet<Groups>('/groups', filterParams(f), signal),
+  auth: {
+    me: (signal?: AbortSignal) => apiGet<AuthState>('/auth/me', {}, signal),
+    /** Telegram Login Widget data (only on the domain set for the bot). */
+    widget: (data: Record<string, unknown>) => apiPost<AuthState>('/auth/telegram', data),
+    /** A one-time t.me/<bot>?start=<code> link. */
+    link: () => apiPost<LoginLink>('/auth/link'),
+    linkStatus: (token: string) => apiGet<LoginLinkStatus>(`/auth/link/${encodeURIComponent(token)}`),
+    logout: () => apiPost<AuthState>('/auth/logout'),
+  },
 }
 
 /** URL of the server-sent events stream. */

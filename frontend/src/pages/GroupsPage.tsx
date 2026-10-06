@@ -2,8 +2,9 @@
 import { Search } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router'
-import { useGroups } from '../api/hooks'
+import { useAccess, useGroups } from '../api/hooks'
 import type { GroupRow } from '../api/types'
+import { LockedCard } from '../components/auth/Auth'
 import { BarList } from '../components/ui/BarList'
 import { Card } from '../components/ui/Card'
 import { DataTable, type Column } from '../components/ui/DataTable'
@@ -17,7 +18,11 @@ import { useLinkTo } from '../lib/links'
 import { SERIES } from '../lib/palette'
 
 export function GroupsPage() {
-  const query = useGroups()
+  const access = useAccess()
+  const query = useGroups({ enabled: access === 'full' })
+  if (access === 'public') {
+    return <LockedCard title="Telegram groups are private">The groups the ads come from are shown after you log in with Telegram.</LockedCard>
+  }
   return (
     <QueryView
       query={query}

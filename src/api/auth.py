@@ -1,4 +1,4 @@
-"""Log in with Telegram: who may see province data and Telegram group details.
+"""Log in with Telegram: who may see Telegram group details (the job map and province numbers are public).
 
 Both ways end in the same signed session cookie (no server-side session store):
 
@@ -211,25 +211,20 @@ class DeepLinkLogins:
 
 
 def public_view(name: str, data: dict[str, Any]) -> dict[str, Any]:
-    """A response without province and group details, for visitors who are not logged in."""
-    if name == "overview":
-        return {**data, "top_provinces": []}
-    if name == "pay":
-        return {**data, "by_province": []}
-    if name == "jobs":
-        return {**data, "matrix": {**data["matrix"], "provinces": [], "cells": []}}
+    """A response without Telegram group details, for visitors who are not logged in."""
     if name == "feed":
-        return {**data, "items": [{**item, "province": None, "city": None, "group_title": ""} for item in data["items"]]}
+        return {**data, "items": hide_groups(data["items"])}
+    if name == "region":
+        return {**data, "groups": [], "latest": hide_groups(data["latest"])}
     return data
 
 
-def public_event(event: str, data: dict[str, Any]) -> dict[str, Any]:
-    """Live updates for visitors who are not logged in: no per-province counts."""
-    return {**data, "provinces": {}} if event == "update" and "provinces" in data else data
+def hide_groups(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{**item, "group_title": ""} for item in items]
 
 
-LOCKED_ENDPOINTS = frozenset({"locations", "regions", "groups"})
-LOCKED_MESSAGE = "Log in with Telegram to see province and Telegram group data"
+LOCKED_ENDPOINTS = frozenset({"groups"})
+LOCKED_MESSAGE = "Log in with Telegram to see the Telegram groups"
 
 
 def describe(config: AuthConfig, user: dict[str, Any] | None) -> dict[str, Any]:

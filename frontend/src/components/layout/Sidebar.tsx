@@ -1,7 +1,8 @@
 // Left navigation: app name, the six pages, and a footer with live status, last update and data range.
 import clsx from 'clsx'
+import { Lock } from 'lucide-react'
 import { NavLink } from 'react-router'
-import { useHealth, useMeta } from '../../api/hooks'
+import { useAccess, useHealth, useMeta } from '../../api/hooks'
 import type { ListenerStatus } from '../../api/types'
 import { useNow } from '../../hooks/useNow'
 import { BOUNDARIES_CREDIT } from '../../lib/constants'
@@ -9,6 +10,7 @@ import { fmtDate, fmtInt, fmtRelative } from '../../lib/format'
 import { useLinkTo } from '../../lib/links'
 import { ROUTES } from '../../lib/routes'
 import { useLive } from '../../state/live'
+import { AccountBox } from '../auth/Auth'
 import { statusText } from './LiveBadge'
 
 export function Logo() {
@@ -64,11 +66,15 @@ function ListenerLine({ status, now }: { status: ListenerStatus; now: number }) 
   )
 }
 
+/** Pages that show Telegram group details (locked until login). */
+const PRIVATE_PATHS = new Set(['/groups'])
+
 export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const linkTo = useLinkTo()
   const live = useLive()
   const meta = useMeta()
   const health = useHealth()
+  const access = useAccess()
   const now = useNow(5000)
   const dot = { live: 'bg-emerald-500', connecting: 'bg-slate-400', reconnecting: 'bg-amber-500', loading: 'bg-blue-500', offline: 'bg-rose-500' }[live.status]
 
@@ -97,11 +103,15 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
             >
               <Icon className="size-4" aria-hidden />
               {label}
+              {access === 'public' && PRIVATE_PATHS.has(path) && <Lock className="ml-auto size-3.5 text-slate-400" aria-label="needs login" />}
             </NavLink>
           </li>
         ))}
       </ul>
-      <div className="mt-auto space-y-2 border-t border-slate-900/[0.06] px-2 pt-3 text-xs text-slate-500">
+      <div className="mt-auto px-1 pb-3">
+        <AccountBox />
+      </div>
+      <div className="space-y-2 border-t border-slate-900/[0.06] px-2 pt-3 text-xs text-slate-500">
         <div className="flex items-start gap-2 text-slate-700">
           <span className={clsx('mt-1 size-2 shrink-0 rounded-full', dot)} aria-hidden />
           <span>{statusText(live.status)}</span>

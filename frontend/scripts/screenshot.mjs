@@ -1,12 +1,12 @@
 // Dev tool: screenshot a page with the local Chrome and report console errors / failed requests.
 // node scripts/screenshot.mjs --url URL --out PNG [--width 1600] [--height 1000] [--wait 1500] [--full]
-//                             [--hover CSS] [--click CSS ...]
+//                             [--hover CSS] [--click CSS ...] [--cookie name=value]
 import puppeteer from 'puppeteer-core'
 
 const CHROME = process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 
 function parseArgs(argv) {
-  const args = { width: 1600, height: 1000, wait: 1500, click: [], full: false }
+  const args = { width: 1600, height: 1000, wait: 1500, click: [], full: false, cookie: null }
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i].replace(/^--/, '')
     if (key === 'full') args.full = true
@@ -25,6 +25,10 @@ try {
   await page.setViewport({ width: Number(args.width), height: Number(args.height), deviceScaleFactor: 1 })
   page.on('console', (m) => ['error', 'warn'].includes(m.type()) && problems.push(`console.${m.type()}: ${m.text()}`))
   page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`))
+  if (args.cookie) {
+    const [name, ...rest] = args.cookie.split('=')
+    await page.setCookie({ name, value: rest.join('='), url: args.url })
+  }
   page.on('requestfailed', (r) => !r.url().includes('/api/events') && problems.push(`requestfailed: ${r.url()} ${r.failure()?.errorText}`))
   await page.goto(args.url, { waitUntil: 'networkidle2', timeout: 30_000 }).catch(() => {})
   await new Promise((r) => setTimeout(r, Number(args.wait)))

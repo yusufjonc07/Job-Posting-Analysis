@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import httpx
 from fastapi.testclient import TestClient
 
-from src.api.auth import COOKIE, AuthConfig, public_event, read_session, sign_session, verify_widget
+from src.api.auth import COOKIE, AuthConfig, read_session, sign_session, verify_widget
 from src.api.main import create_app
 from test_dashboard_api import NOW, TempData
 
@@ -47,11 +47,6 @@ class SignatureTests(unittest.TestCase):
         self.assertIsNone(read_session(body[:-2] + "AA." + signature, SECRET))
         self.assertIsNone(read_session(sign_session(ME, SECRET, days=-1), SECRET))
 
-    def test_live_updates_lose_province_counts_for_visitors(self):
-        update = {"version": 3, "added_posts": 2, "provinces": {"Seoul": 2}}
-        self.assertEqual(public_event("update", update)["provinces"], {})
-        self.assertEqual(update["provinces"], {"Seoul": 2}, "the shared event is not changed")
-
 
 class LoginApiTests(unittest.TestCase):
     def setUp(self):
@@ -75,31 +70,33 @@ class LoginApiTests(unittest.TestCase):
         self.client.__exit__(None, None, None)
         self.temp.cleanup()
 
-    def test_visitors_see_jobs_but_not_provinces_or_groups(self):
+    def test_visitors_see_the_job_map_but_not_the_telegram_groups(self):
         me = self.client.get("/api/auth/me").json()
         self.assertEqual((me["required"], me["enabled"], me["user"], me["bot_username"]), (True, True, None, "jobs_login_bot"))
-        for path in ("/api/locations", "/api/groups", "/api/regions/Seoul", "/api/feed?province=Seoul"):
-            with self.subTest(path=path):
-                self.assertEqual(self.client.get(path).status_code, 401)
-        overview = self.client.get("/api/overview").json()
-        self.assertEqual(overview["kpis"]["unique_ads"], 4, "job numbers stay public")
-        self.assertEqual(overview["top_provinces"], [])
-        self.assertEqual(self.client.get("/api/pay").json()["by_province"], [])
-        self.assertEqual(self.client.get("/api/jobs").json()["matrix"]["provinces"], [])
+        self.assertEqual(self.client.get("/api/groups").status_code, 401)
+        self.assertEqual(self.client.get("/api/locations").status_code, 200, "the job map is public")
+        self.assertTrue(self.client.get("/api/overview").json()["top_provinces"])
+        self.assertTrue(self.client.get("/api/pay").status_code == 200 and self.client.get("/api/jobs").json()["matrix"]["provinces"])
+        region = self.client.get("/api/regions/Seoul").json()
+        self.assertEqual(region["ads"], 1, "region numbers are public")
+        self.assertEqual(region["groups"], [], "but not the groups behind them")
+        self.assertTrue(all(i["group_title"] == "" for i in region["latest"]))
         items = self.client.get("/api/feed").json()["items"]
         self.assertTrue(items)
-        self.assertTrue(all(i["province"] is None and i["city"] is None and i["group_title"] == "" for i in items))
+        self.assertTrue(all(i["group_title"] == "" for i in items), "group names are hidden")
+        self.assertTrue(any(i["province"] for i in items), "places are shown")
+        self.assertEqual(self.client.get("/api/feed?province=Seoul").status_code, 200)
 
     def test_widget_login_unlocks_everything_and_logout_locks_again(self):
         response = self.client.post("/api/auth/telegram", json=widget_data(ME))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["user"]["username"], "yusuf_test")
         self.assertIn(COOKIE, self.client.cookies)
-        self.assertEqual(self.client.get("/api/locations").status_code, 200)
-        self.assertTrue(self.client.get("/api/overview").json()["top_provinces"])
+        self.assertEqual(self.client.get("/api/groups").status_code, 200)
+        self.assertTrue(self.client.get("/api/regions/Seoul").json()["groups"])
         self.assertTrue(any(i["group_title"] for i in self.client.get("/api/feed").json()["items"]))
         self.client.post("/api/auth/logout")
-        self.assertEqual(self.client.get("/api/locations").status_code, 401)
+        self.assertEqual(self.client.get("/api/groups").status_code, 401)
 
     def test_bad_widget_data_is_refused(self):
         self.assertEqual(self.client.post("/api/auth/telegram", json={**widget_data(ME), "id": 7}).status_code, 401)
@@ -109,7 +106,7 @@ class LoginApiTests(unittest.TestCase):
                               allowed=frozenset({"someone_else"})))
         self.assertEqual(self.client.post("/api/auth/telegram", json=widget_data(ME)).status_code, 403)
         self.client.cookies.set(COOKIE, sign_session(ME, SECRET, 30))
-        self.assertEqual(self.client.get("/api/locations").status_code, 403, "logged in, but not on the list")
+        self.assertEqual(self.client.get("/api/groups").status_code, 403, "logged in, but not on the list")
 
     def test_deep_link_login(self):
         sent, updates = [], []
@@ -132,14 +129,14 @@ class LoginApiTests(unittest.TestCase):
             self.assertLess(time.monotonic(), deadline, "the bot never saw /start")
             time.sleep(0.05)
         self.assertEqual((status["status"], status["user"]["id"]), ("done", 42))
-        self.assertEqual(self.client.get("/api/locations").status_code, 200)
+        self.assertEqual(self.client.get("/api/groups").status_code, 200)
         self.assertEqual(sent[0]["chat_id"], 42, "the bot confirms the login in Telegram")
         self.assertEqual(self.client.get(f"/api/auth/link/{link['token']}").json()["status"], "unknown", "a code works once")
 
     def test_without_a_bot_login_is_unavailable_but_data_stays_locked(self):
         self.start(AuthConfig(require_login=True, secret=SECRET))
         self.assertEqual(self.client.post("/api/auth/link").status_code, 503)
-        self.assertEqual(self.client.get("/api/locations").status_code, 401)
+        self.assertEqual(self.client.get("/api/groups").status_code, 401)
         self.assertFalse(self.client.get("/api/auth/me").json()["enabled"])
 
 

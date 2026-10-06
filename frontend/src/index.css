@@ -85,6 +85,16 @@
   }
 }
 
+/* Overview carousel: the bar that fills while a slide is shown (duration set inline). */
+@keyframes promo-progress {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
 /* Frosted-glass panel: cards, sidebars, top bar. */
 @utility glass {
   background-color: rgb(255 255 255 / 0.6);

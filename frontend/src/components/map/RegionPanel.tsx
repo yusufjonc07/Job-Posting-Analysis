@@ -3,7 +3,7 @@ import clsx from 'clsx'
 import { MousePointerClick, X } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { useLocations, useRegion } from '../../api/hooks'
+import { useAccess, useLocations, useRegion } from '../../api/hooks'
 import type { Locations, Region } from '../../api/types'
 import { useNow } from '../../hooks/useNow'
 import { useSelectedRegion } from '../../hooks/useSelectedRegion'
@@ -11,6 +11,7 @@ import { LOCATION_SOURCES, PERIOD_LABELS, SOURCE_LABELS } from '../../lib/consta
 import { fmtBucket, fmtInt, fmtKrw, fmtKrwPeriod, fmtPct, fmtRelative } from '../../lib/format'
 import { PERIOD_COLORS, SCRIPT_COLORS, SERIES, SOURCE_COLORS } from '../../lib/palette'
 import { useFilters } from '../../state/filters'
+import { LoginButton } from '../auth/Auth'
 import { FeedItemCard } from '../live/FeedItemCard'
 import { Badge } from '../ui/Badge'
 import { BarList } from '../ui/BarList'
@@ -117,6 +118,7 @@ function SourcesSection({ data }: { data: Locations }) {
 
 function RegionDetails({ id, onClose }: { id: string; onClose: () => void }) {
   const query = useRegion(id)
+  const access = useAccess()
   const now = useNow(30_000)
   const data = query.data
   if (!data) {
@@ -218,6 +220,12 @@ function RegionDetails({ id, onClose }: { id: string; onClose: () => void }) {
         />
       </Section>
 
+      {access === 'public' && (
+        <Section title="Telegram groups">
+          <p className="mb-2.5 text-[13px] leading-5 text-slate-500">The groups these ads come from are shown after you log in with Telegram.</p>
+          <LoginButton size="sm" />
+        </Section>
+      )}
       {data.groups.length > 0 && (
         <Section title="Telegram groups" aside="ads here">
           <ul className="space-y-2">

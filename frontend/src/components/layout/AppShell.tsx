@@ -8,6 +8,7 @@ import { useMediaQuery } from '../../hooks/useMediaQuery'
 import { useSelectedRegion } from '../../hooks/useSelectedRegion'
 import { LiveFeed } from '../live/LiveFeed'
 import { RegionPanel } from '../map/RegionPanel'
+import { PromoCarousel } from '../promo/PromoCarousel'
 import { ChartSkeleton, Skeleton } from '../ui/Skeleton'
 import { Sidebar } from './Sidebar'
 import { StatusGate } from './StatusGate'
@@ -99,6 +100,7 @@ export function AppShell() {
           </Drawer>
         )}
         <div className="min-w-0 px-3 py-3 xl:px-4">
+          {pathname === '/' && <PromoCarousel className="mb-4" />}
           <TopBar
             sideLabel={sideLabel}
             onOpenNav={wide ? undefined : () => setNavOpen(true)}

@@ -51,6 +51,35 @@ export interface ListenerStatus {
   groups?: { live: number; polled: number; skipped: number } | null
   last_message_at: string | null
 }
+/** A Telegram account, as Telegram reports it at login. */
+export interface TelegramUser {
+  id: number
+  first_name?: string
+  last_name?: string
+  username?: string
+  photo_url?: string
+}
+
+/** GET /api/auth/me: whether login is needed for province and group data, and who is logged in. */
+export interface AuthState {
+  required: boolean
+  enabled: boolean
+  user: TelegramUser | null
+  allowed: boolean
+  bot_username: string | null
+  widget_domain: string | null
+}
+
+export interface LoginLink {
+  token: string
+  url: string
+  expires_in: number
+}
+
+export interface LoginLinkStatus extends Partial<AuthState> {
+  status: 'pending' | 'done' | 'expired' | 'unknown' | 'forbidden'
+}
+
 export interface Health {
   status: 'loading' | 'ready'
   progress: number /*0..1*/

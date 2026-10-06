@@ -3,7 +3,7 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { EVENTS_URL, api, isOfflineError } from '../api/client'
-import { useHealth } from '../api/hooks'
+import { useAuth, useHealth } from '../api/hooks'
 import { invalidateStats, queryKeys } from '../api/queryClient'
 import type { Health, HelloEvent, UpdateEvent } from '../api/types'
 import { fmtInt, parseApiDate, plural } from '../lib/format'
@@ -61,6 +61,9 @@ function parse<T>(e: MessageEvent): T | null {
 export function LiveProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
   const health = useHealth()
+  const auth = useAuth()
+  // The event stream is filtered by the session: reconnect when somebody logs in or out.
+  const session = auth.data?.user?.id ?? 0
 
   const [conn, setConn] = useState<Conn>('connecting')
   const [lastEvent, setLastEvent] = useState<UpdateEvent | null>(null)
@@ -264,7 +267,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
       stopPolling()
     }
-  }, [onUpdate, queryClient, seeVersion])
+  }, [onUpdate, queryClient, seeVersion, session])
 
   // Clear toast timers on unmount.
   useEffect(() => {
