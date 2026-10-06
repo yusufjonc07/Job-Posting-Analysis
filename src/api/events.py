@@ -27,14 +27,14 @@ class Broadcaster:
         self.loop = loop
 
     def publish(self, event: str, data: dict) -> None:
-        self._send(sse(event, data))
+        self._send((event, data))
 
     def close(self) -> None:
         """End every stream (server shutdown), so open connections do not block the exit."""
         self.closed = True
         self._send(None)
 
-    def _send(self, message: str | None) -> None:
+    def _send(self, message: tuple[str, dict] | None) -> None:
         loop = self.loop
         if loop is None or loop.is_closed():
             return
@@ -43,14 +43,20 @@ class Broadcaster:
         except RuntimeError:  # loop closed between the check and the call (shutdown)
             pass
 
-    def _fan_out(self, message: str | None) -> None:
+    def _fan_out(self, message: tuple[str, dict] | None) -> None:
         for queue in list(self.queues):
             if queue.full():  # a stalled client loses its oldest event rather than blocking everyone
                 queue.get_nowait()
             queue.put_nowait(message)
 
-    async def stream(self, hello: Callable[[], dict], ping_seconds: float = PING_SECONDS) -> AsyncIterator[str]:
-        """One client's event stream: hello first, then published events and keep-alive pings."""
+    async def stream(
+        self,
+        hello: Callable[[], dict],
+        ping_seconds: float = PING_SECONDS,
+        view: Callable[[str, dict], dict] | None = None,
+    ) -> AsyncIterator[str]:
+        """One client's event stream: hello first, then published events (through `view`, e.g. without
+        data the viewer may not see) and keep-alive pings."""
         queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_SIZE)
         self.queues.add(queue)
         try:
@@ -59,9 +65,11 @@ class Broadcaster:
                 try:
                     message = await asyncio.wait_for(queue.get(), timeout=ping_seconds)
                 except TimeoutError:
-                    message = ": ping\n\n"
+                    yield ": ping\n\n"
+                    continue
                 if message is None:
                     break
-                yield message
+                event, data = message
+                yield sse(event, view(event, data) if view else data)
         finally:
             self.queues.discard(queue)

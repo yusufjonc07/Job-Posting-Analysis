@@ -150,8 +150,14 @@ class TdlibClient:
         One request per username, ever: the answer is kept in the lookup cache (and Telethon's session).
         """
         link = f"https://t.me/{username}"
-        if link in self._resolved_group_links and self._resolved_group_links[link] is None:
-            return None
+        if link in self._resolved_group_links:
+            known = self._resolved_group_links[link]
+            if known is None:
+                return None
+            chat_id = int(f"-100{known}") if known > 0 else known
+            title = self._cache.title(chat_id) if self._cache else None
+            if title:
+                return {"id": chat_id, "title": title, "kind": "group"}
         entity = await self._client.get_entity(username)
         if not isinstance(entity, (Channel, Chat)):
             self._remember_link(link, None)

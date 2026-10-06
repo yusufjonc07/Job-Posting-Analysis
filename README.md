@@ -48,3 +48,13 @@ Only job offers are counted. Every message is classified by `src/utils/job_filte
 The web app never calls Telegram: every page request is answered from the server's memory. Telegram lookups (group links, titles) are saved in `data/raw/.state/telegram_lookups.json` and requested only once, also across restarts. Only one crawler/listener can use the Telegram session at a time; a second one stops with a message.
 
 The first server start reads every raw file (about 20 s) and saves a cache to `data/cache/`; later starts take under a second. Set `API_TELEGRAM_LISTENER=0` to run the dashboard without the listener (e.g. when you run `python -m src.main --listen` yourself in another terminal; the sidebar shows its status either way). For frontend development, run `npm run dev` in `frontend/` (http://localhost:5173); it proxies `/api` to port 8000. Other settings: `RAW_DATA_DIR`, `API_CACHE_DIR`, `API_POLL_SECONDS` (fallback check interval), `API_CORS_ORIGINS`, `API_WORKERS`. Tests: `python -m pytest tests`.
+
+## Finding new job groups
+
+```bash
+python -m src.discover_groups --list      # links mentioned in posts that are not checked yet (no Telegram request)
+python -m src.discover_groups             # check up to 50 of them, most mentioned first
+python -m src.discover_groups --level 3   # also check groups linked from checked groups, 3 levels deep (the default)
+```
+
+Every `t.me` link in the posts is collected. For each public group or channel not followed yet, its last 100 messages are read (one request) and classified; a group with at least 5 job offers that was active in the last 30 days is added to `data/telegram_groups.csv` with an empty province and city (assign them later; restart the server afterwards so existing posts are re-located) and its checked messages are saved to `data/raw`. The listener starts following added groups within 30 seconds. Links in our data are level 1; the links found in the messages of a checked group (added or not) are the next level, up to `--level` (default 3, `1` = no recursion). They cost no extra request and wait in the discovery state when a run's `--limit` is used up; all levels are checked most mentioned first. Each link is checked once (results in `data/raw/.state/discovery.json`; rejected links again after 30 days); private invite links cannot be checked without joining. Telegram limits username lookups, so a run stops at a long flood wait and the next run continues. While the listener runs it holds the Telegram session, so the command asks the listener to do the check (results appear in the server log); the listener also runs it by itself once a day (`DISCOVER_EVERY_HOURS`, `0` turns that off). Options: `--limit`, `--min-jobs`, `--min-mentions`, `--dry-run`.

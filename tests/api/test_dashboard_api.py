@@ -226,6 +226,17 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(all(item["id"] not in {f"{OTHER_FILE}:30", f"{OTHER_FILE}:31", f"{OTHER_FILE}:32"}
                             for item in self.get("/api/feed?limit=100")["items"]))
 
+    def test_a_group_added_to_the_csv_shows_its_title_without_a_restart(self):
+        version = self.get("/api/health")["version"]
+        with self.data.groups_csv.open("a", encoding="utf-8") as target:
+            target.write("-1009000000002,Busan baliq ishlari,2,,,\n")
+        deadline = time.monotonic() + 5
+        while self.get("/api/health")["version"] == version:
+            self.assertLess(time.monotonic(), deadline, "the csv change was not picked up")
+            time.sleep(0.02)
+        titles = {g["source_file"]: g["title"] for g in self.get("/api/groups")["groups"]}
+        self.assertEqual(titles[OTHER_FILE], "Busan baliq ishlari")
+
     def test_new_lines_bump_the_version(self):
         version = self.get("/api/health")["version"]
         self.data.append(OTHER_FILE, message(13, "Incheon 물류 창고 ish, soatiga 12.000 won", NOW))

@@ -243,6 +243,7 @@ class Store:
         self.progress = 0.0
         self.error: str | None = None
         self.csv_rows = read_groups_csv(config.groups_csv)
+        self._csv_mtime = self._groups_csv_mtime()
         self.files: dict[str, FileState] = {}
         self.seen: dict[str, set[int]] = {}
         self.snapshot = self._make_snapshot(0, with_derived(empty_rows()), None)
@@ -292,7 +293,7 @@ class Store:
     def poll(self) -> dict | None:
         """Read lines appended since the last call; returns the update event payload if rows changed."""
         with self._lock:
-            update = self._poll(publish=True)
+            update = self._poll(publish=True) or self._reload_groups_csv()
             if self.dirty and time.monotonic() - self.last_save >= self.config.save_interval:
                 self.save_cache()
         return update
@@ -514,6 +515,26 @@ class Store:
         self.dirty = True
         update = self._update_event(old, self.snapshot, rows, now)
         if publish and self.on_update:
+            self.on_update(update)
+        return update
+
+    def _groups_csv_mtime(self) -> float:
+        try:
+            return self.config.groups_csv.stat().st_mtime
+        except FileNotFoundError:
+            return 0.0
+
+    def _reload_groups_csv(self) -> dict | None:
+        """Group discovery adds rows to telegram_groups.csv: show their titles without a restart."""
+        mtime = self._groups_csv_mtime()
+        if mtime == self._csv_mtime:
+            return None
+        self._csv_mtime = mtime
+        self.csv_rows = read_groups_csv(self.config.groups_csv)
+        old = self.snapshot
+        self.snapshot = self._make_snapshot(old.version + 1, old.messages, old.last_update)
+        update = self._update_event(old, self.snapshot, empty_rows(), datetime.now(UTC))
+        if self.on_update:
             self.on_update(update)
         return update
 

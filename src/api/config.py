@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config.settings import PROJECT_ROOT  # importing settings also loads .env
+from src.api.auth import AuthConfig, load_secret, parse_allowed
 
 DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 
@@ -24,6 +25,7 @@ class ApiConfig:
     use_cache: bool = True
     watch_files: bool = True
     telegram_listener: bool = False
+    auth: AuthConfig = AuthConfig()
 
 
 def resolve_path(value: str | None, default: Path) -> Path:
@@ -44,9 +46,21 @@ def load_config() -> ApiConfig:
     """Read the API_* variables (and RAW_DATA_DIR) from the environment."""
     origins = os.getenv("API_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)
     workers = os.getenv("API_WORKERS", "").strip()
+    cache_dir = resolve_path(os.getenv("API_CACHE_DIR"), PROJECT_ROOT / "data" / "cache")
+    secret = os.getenv("DASHBOARD_SECRET", "").strip()
+    auth = AuthConfig(
+        bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+        bot_username=os.getenv("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@"),
+        login_domain=os.getenv("TELEGRAM_LOGIN_DOMAIN", "").strip(),
+        allowed=parse_allowed(os.getenv("DASHBOARD_ALLOWED_USERS")),
+        require_login=flag(os.getenv("DASHBOARD_REQUIRE_LOGIN"), default=True),
+        secret=secret.encode() if secret else load_secret(cache_dir / "session_secret"),
+        secure_cookie=flag(os.getenv("DASHBOARD_SECURE_COOKIE"), default=False),
+    )
     return ApiConfig(
         raw_dir=resolve_path(os.getenv("RAW_DATA_DIR"), PROJECT_ROOT / "data" / "raw"),
-        cache_dir=resolve_path(os.getenv("API_CACHE_DIR"), PROJECT_ROOT / "data" / "cache"),
+        cache_dir=cache_dir,
+        auth=auth,
         poll_seconds=float(os.getenv("API_POLL_SECONDS", "2") or 2),
         telegram_listener=flag(os.getenv("API_TELEGRAM_LISTENER"), default=True),
         cors_origins=tuple(origin.strip() for origin in origins.split(",") if origin.strip()),

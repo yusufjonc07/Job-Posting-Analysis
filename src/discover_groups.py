@@ -1,13 +1,19 @@
 """Find new job groups from the Telegram links mentioned in posts, and follow the ones with job offers.
 
-    python -m src.discover_groups            # check up to 50 links, most mentioned first
-    python -m src.discover_groups --list     # only list the candidate links (no Telegram request)
+    python -m src.discover_groups              # check up to 50 links, most mentioned first
+    python -m src.discover_groups --level 3    # also follow links found in checked groups, 3 levels deep
+    python -m src.discover_groups --list       # only list the candidate links (no Telegram request)
 
 Every t.me link in data/raw (message text and link entities) is collected. For each public group or
 channel that is not followed yet, its last 100 messages are read (one request) and classified with
 src.utils.job_filter. A group with at least --min-jobs job offers, active in the last 30 days, is added
 to data/telegram_groups.csv (province and city left empty, to be assigned later) and its checked
 messages are saved to data/raw, so the listener follows it from then on without asking Telegram again.
+
+Recursion: links in our own data are level 1. The links found in the messages of a group checked at level
+k (added or not) are level k+1, up to --level; they cost no extra request (the messages were read for the
+check anyway) and wait in discovery.json when the run's --limit is used up. Candidates of all levels are
+checked most mentioned first; --min-mentions only applies to level 1 (our data is full of one-off links).
 
 Each link is checked once: results are kept in data/raw/.state/discovery.json (rejected links are checked
 again after 30 days). Telegram limits username lookups, so a run stops at a long flood wait and the next
@@ -18,6 +24,7 @@ command asks the listener to run the check instead.
 import argparse
 import asyncio
 import csv
+import heapq
 import json
 import os
 import re
@@ -47,6 +54,8 @@ MIN_MENTIONS = 2
 MAX_AGE_DAYS = 30
 RECHECK_DAYS = 30
 RUN_LIMIT = 50
+DEFAULT_LEVEL = 3
+MAX_FOUND_IN = 5
 DISCOVER_EVERY_HOURS = float(os.getenv("DISCOVER_EVERY_HOURS", "24") or 0)  # the listener's automatic run; 0 = off
 PAUSE_BETWEEN_CHECKS = 2.0
 STATE_FILE = "discovery.json"
@@ -64,6 +73,7 @@ class Options:
     min_jobs: int = MIN_JOBS
     min_mentions: int = MIN_MENTIONS
     dry_run: bool = False
+    level: int = DEFAULT_LEVEL
 
 
 def link_target(url: str) -> str | None:
@@ -84,6 +94,21 @@ def link_target(url: str) -> str | None:
     return f"username:{name}"
 
 
+def links_in(message: dict[str, Any]) -> tuple[list[str], int]:
+    """Chat links in a raw Telegram message (its text and link entities), and its private invite links."""
+    texts = [str(message.get("message") or "")]
+    texts += [str(e.get("url") or "") for e in message.get("entities") or [] if isinstance(e, dict)]
+    targets, invites = [], 0
+    for text in texts:
+        for match in LINK.finditer(text):
+            target = link_target(match.group(0))
+            if target:
+                targets.append(target)
+            elif match.group(1).startswith("+") or match.group(1).lower().startswith("joinchat"):
+                invites += 1
+    return targets, invites
+
+
 def collect_links(raw_dir: Path) -> tuple[Counter, int]:
     """How often each chat link is mentioned in data/raw, and how many private invite links were seen."""
     targets: Counter = Counter()
@@ -97,16 +122,24 @@ def collect_links(raw_dir: Path) -> tuple[Counter, int]:
                     message = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                urls = [str(message.get("message") or "")]
-                urls += [str(e.get("url") or "") for e in message.get("entities") or [] if isinstance(e, dict)]
-                for text in urls:
-                    for match in LINK.finditer(text):
-                        target = link_target(match.group(0))
-                        if target:
-                            targets[target] += 1
-                        elif match.group(1).startswith("+") or match.group(1).lower().startswith("joinchat"):
-                            invites += 1
+                found, invite_count = links_in(message)
+                targets.update(found)
+                invites += invite_count
     return targets, invites
+
+
+def links_in_checked(messages: list[dict[str, Any]]) -> Counter:
+    """Chat links in the messages read while checking a group (the next level of discovery)."""
+    targets: Counter = Counter()
+    for message in messages:
+        try:
+            raw = json.loads(message.get("raw_message_json") or "{}")
+        except json.JSONDecodeError:
+            raw = {}
+        if not raw.get("message"):
+            raw = {"message": message_text(message)}
+        targets.update(links_in(raw)[0])
+    return targets
 
 
 def message_text(message: dict[str, Any]) -> str:
@@ -126,6 +159,7 @@ class DiscoveryState:
         self.checked: dict[str, dict] = data.get("checked", {})
         self.paused_until: float = float(data.get("paused_until", 0))
         self.last_run: float = float(data.get("last_run", 0))
+        self.pending: dict[str, dict] = data.get("pending", {})   # links found in checked groups, not checked yet
 
     def due(self, target: str, now: float) -> bool:
         entry = self.checked.get(target)
@@ -133,10 +167,19 @@ class DiscoveryState:
             return True
         return not entry.get("added") and entry.get("result") in {"rejected", "error"} and now - entry.get("checked_at", 0) > RECHECK_DAYS * 86_400
 
+    def add_found(self, target: str, level: int, mentions: int, found_in: int) -> dict:
+        """Remember a link seen in a checked group; the shallowest level wins, mentions add up."""
+        entry = self.pending.setdefault(target, {"level": level, "mentions": 0, "found_in": []})
+        entry["level"] = min(entry["level"], level)
+        entry["mentions"] += mentions
+        if found_in not in entry["found_in"] and len(entry["found_in"]) < MAX_FOUND_IN:
+            entry["found_in"].append(found_in)
+        return entry
+
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
-        payload = {"checked": self.checked, "paused_until": self.paused_until, "last_run": self.last_run}
+        payload = {"checked": self.checked, "paused_until": self.paused_until, "last_run": self.last_run, "pending": self.pending}
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
         temporary.replace(self.path)
 
@@ -170,15 +213,27 @@ async def discover(
         return []
     followed = set(known_group_ids(raw_dir, groups_csv))
     targets, invites = await asyncio.to_thread(collect_links, raw_dir)
-    queue = [t for t, n in targets.most_common() if n >= options.min_mentions and state.due(t, now)]
-    log(f"Group discovery: {len(targets):,} linked chats ({invites:,} private invite links skipped), "
-        f"{len(queue):,} not checked yet; checking up to {options.limit}")
+    # (level, mentions) per candidate: level 1 from our data, deeper ones found in checked groups.
+    candidates = {t: (1, n) for t, n in targets.items() if n >= options.min_mentions}
+    for target, found in state.pending.items():
+        if found["level"] <= options.level and target not in candidates:
+            candidates[target] = (found["level"], found["mentions"])
+    heap = [(-n, level, t) for t, (level, n) in candidates.items() if state.due(t, now)]
+    heapq.heapify(heap)
+    log(f"Group discovery: {len(targets):,} linked chats in our data ({invites:,} private invite links skipped), "
+        f"{len(heap):,} to check up to level {options.level}; checking up to {options.limit}")
     added: list[dict] = []
     checked = 0
-    for target in queue:
-        if checked >= options.limit:
-            break
-        entry: dict[str, Any] = {"mentions": targets[target], "checked_at": time.time()}
+    done: set[str] = set()
+    while heap and checked < options.limit:
+        _, level, target = heapq.heappop(heap)
+        if target in done or candidates.get(target, (level,))[0] < level:
+            continue  # already handled, or queued again at a shallower level
+        done.add(target)
+        found = state.pending.get(target, {})
+        entry: dict[str, Any] = {"mentions": candidates[target][1], "level": level, "checked_at": time.time()}
+        if found.get("found_in"):
+            entry["found_in"] = found["found_in"]
         try:
             info = await resolve(client, target)
             if info is None:
@@ -193,6 +248,18 @@ async def discover(
                 newest = max((m.get("date") or 0 for m in messages), default=0)
                 active = newest >= time.time() - MAX_AGE_DAYS * 86_400
                 entry.update(messages=len(messages), jobs=jobs, newest=newest)
+                if level < options.level:  # the links in this group are the next level
+                    linked_here = links_in_checked(messages)
+                    entry["links"] = len(linked_here)
+                    for linked, mentions in linked_here.items():
+                        if linked == target or linked in done or not state.due(linked, now):
+                            continue
+                        found_entry = state.add_found(linked, level + 1, mentions, info["id"])
+                        known_level = candidates.get(linked, (level + 2,))[0]
+                        if level + 1 <= known_level:
+                            total = max(found_entry["mentions"], candidates.get(linked, (0, 0))[1])
+                            candidates[linked] = (min(known_level, level + 1), total)
+                            heapq.heappush(heap, (-total, level + 1, linked))
                 if jobs >= options.min_jobs and active:
                     entry["result"] = "added"
                     if not options.dry_run:
@@ -202,12 +269,12 @@ async def discover(
                         followed.add(info["id"])
                         entry["added"] = True
                     added.append(entry)
-                    log(f"  + {info['title']} ({info['id']}): {jobs} job offers in the last {len(messages)} messages"
+                    log(f"  + [level {level}] {info['title']} ({info['id']}): {jobs} job offers in the last {len(messages)} messages"
                         f"{' (dry run, not added)' if options.dry_run else ' -> now followed'}")
                 else:
                     entry["result"] = "rejected"
                     reason = "inactive for 30+ days" if not active else f"{jobs} job offers in the last {len(messages)} messages"
-                    log(f"  - {info['title']} ({info['id']}): {reason}")
+                    log(f"  - [level {level}] {info['title']} ({info['id']}): {reason}")
                 await asyncio.sleep(PAUSE_BETWEEN_CHECKS)
         except FloodWaitError as error:
             state.paused_until = time.time() + error.seconds
@@ -217,6 +284,7 @@ async def discover(
         except (ValueError, TypeError, RPCError) as error:  # unknown username, private chat, ...
             entry.update(result="error", error=f"{type(error).__name__}: {error}")
         state.checked[target] = entry
+        state.pending.pop(target, None)
         state.save()
     state.last_run = time.time()
     state.save()
@@ -253,14 +321,26 @@ def read_request(raw_dir: Path) -> Options | None:
     except (FileNotFoundError, json.JSONDecodeError):
         return None
     path.unlink(missing_ok=True)
-    return Options(**{key: data[key] for key in ("limit", "min_jobs", "min_mentions", "dry_run") if key in data})
+    return Options(**{key: data[key] for key in ("limit", "min_jobs", "min_mentions", "dry_run", "level") if key in data})
+
+
+def _level(value: str) -> int:
+    try:
+        level = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number, got {value!r}") from None
+    if level < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return level
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m src.discover_groups", description=__doc__.split("\n\n")[0])
     parser.add_argument("--limit", type=int, default=RUN_LIMIT, help=f"chats to check in this run (default {RUN_LIMIT})")
     parser.add_argument("--min-jobs", type=int, default=MIN_JOBS, help=f"job offers needed in the last {CHECK_MESSAGES} messages (default {MIN_JOBS})")
-    parser.add_argument("--min-mentions", type=int, default=MIN_MENTIONS, help=f"skip links mentioned fewer times (default {MIN_MENTIONS})")
+    parser.add_argument("--min-mentions", type=int, default=MIN_MENTIONS, help=f"skip links in our data mentioned fewer times (default {MIN_MENTIONS})")
+    parser.add_argument("--level", type=_level, default=DEFAULT_LEVEL,
+                        help=f"follow links found in checked groups this many levels deep; 1 = only links in our data (default {DEFAULT_LEVEL})")
     parser.add_argument("--dry-run", action="store_true", help="check, but do not add any group")
     parser.add_argument("--list", action="store_true", help="only list candidate links, without asking Telegram")
     return parser.parse_args(argv)
@@ -282,16 +362,22 @@ async def run_standalone(options: Options) -> int:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    options = Options(limit=args.limit, min_jobs=args.min_jobs, min_mentions=args.min_mentions, dry_run=args.dry_run)
+    options = Options(limit=args.limit, min_jobs=args.min_jobs, min_mentions=args.min_mentions, dry_run=args.dry_run, level=args.level)
     raw_dir = settings.raw_data_dir
     if args.list:
         targets, invites = collect_links(raw_dir)
         state = DiscoveryState(raw_dir / ".state" / STATE_FILE)
         now = time.time()
-        due = [(t, n) for t, n in targets.most_common() if n >= options.min_mentions and state.due(t, now)]
-        print(f"{len(targets):,} linked chats, {invites:,} private invite links; {len(due):,} to check (mentioned {options.min_mentions}+ times):")
-        for target, count in due[:100]:
-            print(f"  {count:6,}  {target}")
+        due = [(n, 1, t) for t, n in targets.items() if n >= options.min_mentions and state.due(t, now)]
+        due += [(p["mentions"], p["level"], t) for t, p in state.pending.items()
+                if p["level"] <= options.level and t not in targets and state.due(t, now)]
+        due.sort(key=lambda item: (-item[0], item[1]))
+        deeper = sum(1 for _, level, _ in due if level > 1)
+        print(f"{len(targets):,} linked chats in our data, {invites:,} private invite links; {len(due):,} to check "
+              f"({deeper:,} found in checked groups, up to level {options.level}):")
+        print("  mentions  level  link")
+        for count, level, target in due[:100]:
+            print(f"  {count:8,}  {level:5}  {target}")
         return
 
     from src.main import acquire_session_lock

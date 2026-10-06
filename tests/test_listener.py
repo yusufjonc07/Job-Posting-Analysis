@@ -86,13 +86,16 @@ class FakeTelegram:
         self.requests: list[tuple[int | None, int]] = []
         self.during_history: list[dict[str, Any]] = []   # pushed while the catch-up is reading
 
-    def on_new_message(self, chat_ids: tuple[int, ...], callback: Callable[[dict[str, Any]], None]) -> None:
+    def on_new_message(self, wanted: Callable[[int], bool], callback: Callable[[dict[str, Any]], None]) -> None:
+        self.wanted = wanted
         self.callback = callback
 
     def push(self, message: dict[str, Any]) -> None:
+        """Telegram delivers a new message; the listener's subscription decides whether it wants it."""
         self.history.append(message)
         assert self.callback is not None
-        self.callback(message)
+        if self.wanted(message["chat_id"]):
+            self.callback(message)
 
     async def iter_messages_async(self, chat_id: int, limit: int | None = None, min_id: int = 0):
         self.requests.append((limit, min_id))

@@ -15,11 +15,24 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from src.api import stats
+from src.api.auth import (
+    COOKIE,
+    LOCKED_ENDPOINTS,
+    LOCKED_MESSAGE,
+    DeepLinkLogins,
+    describe,
+    is_allowed,
+    public_event,
+    public_view,
+    read_session,
+    sign_session,
+    verify_widget,
+)
 from src.api.config import ApiConfig, load_config
 from src.api.events import Broadcaster
 from src.api.store import PROVINCE_IDS, Snapshot, Store
@@ -120,6 +133,8 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
         broadcaster.publish("update", update)
 
     store = Store(config, on_status=on_status, on_update=on_update)
+    auth = config.auth
+    links = DeepLinkLogins(auth)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -130,12 +145,16 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
         log.info("reading %s (cache %s)", config.raw_dir, config.cache_dir)
         thread.start()
         listener.start()
+        if auth.require_login and not auth.enabled:
+            log.warning("Province and group data need a Telegram login, but no bot is set up: add TELEGRAM_BOT_TOKEN and "
+                        "TELEGRAM_BOT_USERNAME to .env (or DASHBOARD_REQUIRE_LOGIN=0 to show everything without login)")
         if not config.telegram_listener:
             log.info("Telegram listener off (API_TELEGRAM_LISTENER=0): new posts appear when a crawler writes them")
         try:
             yield
         finally:
             broadcaster.close()
+            await links.stop()
             await listener.stop()
             stop.set()
             await asyncio.to_thread(thread.join, SHUTDOWN_SECONDS)
@@ -144,7 +163,8 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
     app.state.store = store
     app.state.broadcaster = broadcaster
     app.state.listener = listener
-    app.add_middleware(CORSMiddleware, allow_origins=list(config.cors_origins), allow_methods=["GET"], allow_headers=["*"])
+    app.state.links = links
+    app.add_middleware(CORSMiddleware, allow_origins=list(config.cors_origins), allow_methods=["GET", "POST"], allow_headers=["*"])
 
     @app.exception_handler(StoreLoading)
     async def loading_response(request: Request, error: StoreLoading) -> JSONResponse:
@@ -167,6 +187,24 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
             raise HTTPException(status_code=404, detail="Unknown region")
         return province
 
+    def session_user(request: Request) -> dict | None:
+        return read_session(request.cookies.get(COOKIE), auth.secret)
+
+    def full_access(request: Request) -> bool:
+        """Province and group data: for everyone when login is not required, else for allowed logged-in users."""
+        return not auth.require_login or is_allowed(session_user(request), auth)
+
+    def require_full_access(request: Request) -> None:
+        if not full_access(request):
+            user = session_user(request)
+            raise HTTPException(status_code=403 if user else 401, detail=LOCKED_MESSAGE)
+
+    def start_session(response: Response, user: dict) -> None:
+        response.set_cookie(
+            COOKIE, sign_session(user, auth.secret, auth.session_days), max_age=auth.session_days * 86_400,
+            httponly=True, samesite="lax", secure=auth.secure_cookie, path="/",
+        )
+
     Ready = Annotated[Snapshot, Depends(snapshot)]
     Filtered = Annotated[stats.Filters, Depends(filters)]
 
@@ -184,8 +222,11 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
         return cache.get(("meta", current.version), lambda: stats.meta(current))
 
     def stats_route(name: str, function: Callable) -> None:
-        def endpoint(current: Ready, chosen: Filtered) -> dict:
-            return cached(name, current, lambda moment: function(current, chosen, moment), chosen)
+        def endpoint(request: Request, current: Ready, chosen: Filtered) -> dict:
+            if name in LOCKED_ENDPOINTS:
+                require_full_access(request)
+            data = cached(name, current, lambda moment: function(current, chosen, moment), chosen)
+            return data if full_access(request) else public_view(name, data)
 
         app.add_api_route(f"/api/{name}", endpoint, methods=["GET"], name=name)
 
@@ -193,11 +234,13 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
         stats_route(name, function)
 
     @app.get("/api/regions/{province}")
-    def region(province: Annotated[str, Depends(province_id)], current: Ready, chosen: Filtered) -> dict:
+    def region(request: Request, province: Annotated[str, Depends(province_id)], current: Ready, chosen: Filtered) -> dict:
+        require_full_access(request)
         return cached("region", current, lambda moment: stats.region(current, chosen, moment, province), chosen, province)
 
     @app.get("/api/feed")
     def feed(
+        request: Request,
         current: Ready,
         chosen: Filtered,
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
@@ -205,14 +248,55 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
     ) -> dict:
         if province is not None:
             province_id(province)
-        return cached("feed", current, lambda moment: stats.feed(current, chosen, moment, limit, province),
+            require_full_access(request)
+        data = cached("feed", current, lambda moment: stats.feed(current, chosen, moment, limit, province),
                       chosen, limit, province)
+        return data if full_access(request) else public_view("feed", data)
+
+    @app.get("/api/auth/me")
+    def auth_me(request: Request) -> dict:
+        return describe(auth, session_user(request))
+
+    @app.post("/api/auth/telegram")
+    def auth_widget(response: Response, data: Annotated[dict, Body()]) -> dict:
+        """Telegram Login Widget: the browser posts the data the widget signed."""
+        if not auth.enabled:
+            raise HTTPException(status_code=503, detail="Login with Telegram is not set up on this server")
+        user = verify_widget(data, auth.bot_token)
+        if user is None:
+            raise HTTPException(status_code=401, detail="The Telegram login could not be verified")
+        if not is_allowed(user, auth):
+            raise HTTPException(status_code=403, detail="This Telegram account is not allowed to see this data")
+        start_session(response, user)
+        return describe(auth, user)
+
+    @app.post("/api/auth/link")
+    async def auth_link() -> dict:
+        """Deep-link login: a one-time t.me/<bot>?start=<code> link."""
+        if not auth.enabled:
+            raise HTTPException(status_code=503, detail="Login with Telegram is not set up on this server")
+        return links.start()
+
+    @app.get("/api/auth/link/{token}")
+    def auth_link_status(token: str, response: Response) -> dict:
+        status, user = links.status(token)
+        if status == "done":
+            if not is_allowed(user, auth):
+                return {"status": "forbidden"}
+            start_session(response, user)
+            return {"status": "done", **describe(auth, user)}
+        return {"status": status}
+
+    @app.post("/api/auth/logout")
+    def auth_logout(response: Response) -> dict:
+        response.delete_cookie(COOKIE, path="/")
+        return describe(auth, None)
 
     @app.get("/api/events")
-    async def events() -> StreamingResponse:
+    async def events(request: Request) -> StreamingResponse:
         hello = lambda: {"version": store.snapshot.version, "status": store.status}  # noqa: E731
         return StreamingResponse(
-            broadcaster.stream(hello),
+            broadcaster.stream(hello, view=None if full_access(request) else public_event),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
