@@ -225,6 +225,8 @@ def meta(snapshot: Snapshot) -> dict:
         "date_min": iso(dates.min()) if len(dates) else None,
         "date_max": iso(dates.max()) if len(dates) else None,
         "groups": int(len(snapshot.groups)),
+        "messages": int(len(snapshot.messages)),
+        "excluded": snapshot.excluded,
     }
 
 

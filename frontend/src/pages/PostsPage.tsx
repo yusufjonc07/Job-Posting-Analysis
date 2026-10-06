@@ -2,7 +2,7 @@
 import { scaleLinear, scaleLog } from 'd3-scale'
 import { useState } from 'react'
 import { Bar, BarChart, CartesianGrid, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { usePosts } from '../api/hooks'
+import { useMeta, usePosts } from '../api/hooks'
 import type { Posts } from '../api/types'
 import { BarList } from '../components/ui/BarList'
 import { Card } from '../components/ui/Card'
@@ -11,8 +11,9 @@ import { DataTable } from '../components/ui/DataTable'
 import { Skeleton } from '../components/ui/Skeleton'
 import { EmptyState, QueryView } from '../components/ui/States'
 import { useElementWidth } from '../hooks/useElementWidth'
+import { EXCLUDED_KINDS } from '../lib/constants'
 import { fmtCompact, fmtInt, fmtPct } from '../lib/format'
-import { AXIS, GRID, INK_2, MUTED, SCRIPT_COLORS, SERIES } from '../lib/palette'
+import { AXIS, CONTEXT, GRID, INK_2, MUTED, SCRIPT_COLORS, SERIES } from '../lib/palette'
 
 const SCRIPTS = ['Latin', 'Cyrillic', 'Hangul'] as const
 
@@ -35,6 +36,7 @@ export function PostsPage() {
           <FlagsCard flags={data.flags} stale={stale} />
           <LengthCard length={data.length} stale={stale} />
           <RepostsCard rows={data.reposts} stale={stale} />
+          <ExcludedCard />
         </div>
       )}
     </QueryView>
@@ -177,6 +179,47 @@ function LengthCard({ length, stale }: { length: Posts['length']; stale: boolean
         )}
       </div>
       <div className="mt-1 text-[11px] text-slate-500">Vertical line = median</div>
+    </Card>
+  )
+}
+
+function ExcludedCard() {
+  const meta = useMeta()
+  const excluded = meta.data?.excluded
+  const total = meta.data?.messages
+  if (!excluded || !total) return null
+  const left = Object.values(excluded).reduce((s, n) => s + n, 0)
+  const table = (
+    <DataTable
+      rows={EXCLUDED_KINDS}
+      rowKey={(k) => k.key}
+      columns={[
+        { key: 'k', header: 'Kind', cell: (k) => k.label },
+        { key: 'n', header: 'Messages', align: 'right', cell: (k) => fmtInt(excluded[k.key] ?? 0) },
+        { key: 's', header: 'Share of all messages', align: 'right', cell: (k) => fmtPct((excluded[k.key] ?? 0) / total) },
+      ]}
+    />
+  )
+  return (
+    <Card
+      title="Messages that are not job offers"
+      subtitle={`${fmtInt(left)} of ${fmtInt(total)} messages (${fmtPct(left / total, 0)}, all time) are left out of every number on this dashboard`}
+      table={table}
+      className="lg:col-span-2"
+    >
+      <div className="grid gap-x-8 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <BarList
+          color={CONTEXT}
+          max={Math.max(1, ...EXCLUDED_KINDS.map((k) => excluded[k.key] ?? 0))}
+          items={EXCLUDED_KINDS.map((k) => ({ key: k.key, label: k.label, value: excluded[k.key] ?? 0, display: fmtInt(excluded[k.key] ?? 0) }))}
+        />
+        <p className="mt-4 text-xs leading-5 text-slate-500 md:mt-0">
+          Every message is sorted by a rule-based classifier (src/utils/job_filter.py) that reads Uzbek in Latin and Cyrillic letters,
+          Russian and Korean. A message counts as a job offer when it hires ("ish bor", "5 kishiga", "ishchi kerak", "требуются", "구인")
+          or states pay with job details. Questions like "ish bormi?", parcels, flights, sales, rentals, courses and conversation are
+          left out. The raw data keeps every message.
+        </p>
+      </div>
     </Card>
   )
 }

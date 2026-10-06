@@ -13,6 +13,7 @@ from pathlib import Path
 from config.settings import PROJECT_ROOT
 from src.preprocess import CYRILLIC_PATTERN, HANGUL_PATTERN, LETTER_PATTERN
 from src.utils.deduplication import dedup_key
+from src.utils.job_filter import classify_post
 from src.utils.locations import load_group_locations, resolve_location
 from src.utils.post_parsing import parse_post
 from src.utils.salary import main_salary
@@ -47,7 +48,7 @@ WHITESPACE = re.compile(r"\s+")
 COLUMNS = (
     "row_id", "source_file", "msg_id", "line_no", "date", "dedup_key", "is_forwarded", "is_filled",
     "group_name", "province", "city", "location_source", "salary_krw", "salary_period", "has_phone",
-    "has_url", "n_chars", "hangul_ratio", "cyrillic_ratio", "script", "occupations", "visas", "excerpt",
+    "has_url", "n_chars", "hangul_ratio", "cyrillic_ratio", "script", "occupations", "visas", "excerpt", "kind",
 )
 
 _group_locations: dict[int, tuple[str, str]] | None = None
@@ -147,6 +148,7 @@ def post_features(text: str, source_file: str, locations: dict[int, tuple[str, s
         "occupations": occupation_mask(body),
         "visas": visa_mask(body),
         "excerpt": excerpt(body),
+        "kind": classify_post(text),
     }
 
 

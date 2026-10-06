@@ -2,7 +2,7 @@
 
 Typical use:
 
-    messages = load_messages()                      # one row per unique post
+    messages = load_messages()                      # one row per unique job offer
     preprocessor = build_preprocessor()
     model = make_pipeline(preprocessor, LogisticRegression(max_iter=1000))
     model.fit(messages[["text", "source_file"]], labels)
@@ -28,6 +28,7 @@ if __package__ in {None, ""}:
 
 from config.settings import PROJECT_ROOT, settings
 from src.utils.deduplication import mark_duplicates
+from src.utils.job_filter import JOB_OFFER, classify_post
 from src.utils.locations import load_group_locations, resolve_location
 from src.utils.post_parsing import parse_post, post_body_transformer
 from src.utils.salary import main_salary
@@ -45,11 +46,13 @@ NUMERIC_FEATURES = [
 CATEGORICAL_FEATURES = ["salary_period", "province", "location_source"]
 
 
-def load_messages(raw_dir: Path = settings.raw_data_dir, drop_reposts: bool = True) -> pd.DataFrame:
-    """Read every data/raw/*.jsonl file into text, source_file, msg_id, date columns.
+def load_messages(raw_dir: Path = settings.raw_data_dir, drop_reposts: bool = True, jobs_only: bool = True) -> pd.DataFrame:
+    """Read every data/raw/*.jsonl file into text, source_file, msg_id, date and kind columns.
 
-    Reposts (same job text posted again) are dropped by default; `repost_count` keeps how often
-    each ad appeared. Media-only posts with no text are always dropped.
+    `kind` is src.utils.job_filter.classify_post (job_offer, job_seeker, cargo, travel, sale, service,
+    chat); only job offers are kept unless jobs_only=False. Reposts (same job text posted again) are
+    dropped by default; `repost_count` keeps how often each ad appeared. Media-only posts with no text
+    are always dropped.
     """
     rows = []
     for path in sorted(Path(raw_dir).glob("group_*.jsonl")):
@@ -67,6 +70,9 @@ def load_messages(raw_dir: Path = settings.raw_data_dir, drop_reposts: bool = Tr
                 })
     messages = pd.DataFrame(rows)
     messages = messages[messages["text"].str.strip().ne("")]
+    messages = messages.assign(kind=messages["text"].map(classify_post))
+    if jobs_only:
+        messages = messages[messages["kind"].eq(JOB_OFFER)]
     messages = mark_duplicates(messages, text_column="text", date_column="date")
     if drop_reposts:
         messages = messages[~messages["is_repost"]]

@@ -71,6 +71,10 @@ export interface Meta {
   date_min: string | null
   date_max: string | null
   groups: number
+  /** Every message with text, of every kind; only job offers are used anywhere else. */
+  messages?: number
+  /** Messages that are not job offers, per kind (job_seeker, cargo, travel, sale, service, chat). */
+  excluded?: Record<string, number>
 }
 
 // ---- GET /api/overview ----

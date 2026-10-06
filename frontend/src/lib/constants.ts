@@ -47,6 +47,16 @@ export const SOURCE_LABELS: Record<LocationSource, string> = {
   unknown: 'No location',
 }
 
+/** Kinds of messages that are not job offers (src/utils/job_filter.py), in display order. */
+export const EXCLUDED_KINDS: { key: string; label: string }[] = [
+  { key: 'chat', label: 'Conversation and other' },
+  { key: 'job_seeker', label: 'People looking for work' },
+  { key: 'cargo', label: 'Parcels and cargo' },
+  { key: 'travel', label: 'Flights and rides' },
+  { key: 'sale', label: 'Sales and rentals' },
+  { key: 'service', label: 'Courses and services' },
+]
+
 /** Source credit for the province boundaries. */
 export const BOUNDARIES_CREDIT = 'Boundaries: KOSTAT 2013'
 

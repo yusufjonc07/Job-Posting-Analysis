@@ -151,7 +151,7 @@ class ApiTests(unittest.TestCase):
 
     def test_every_endpoint_has_the_contract_shape(self):
         expected = {
-            "/api/meta": {"version", "provinces", "date_min", "date_max", "groups"},
+            "/api/meta": {"version", "provinces", "date_min", "date_max", "groups", "messages", "excluded"},
             "/api/overview": {"version", "kpis", "volume", "top_provinces"},
             "/api/locations": {"version", "total", "provinces", "unplaced", "sources"},
             "/api/regions/Seoul": {"version", "province", "name_ko", "ads", "rank", "share", "trend", "by_source",
@@ -207,6 +207,24 @@ class ApiTests(unittest.TestCase):
         forwarded = self.get("/api/feed?source=forwarded")["items"][0]
         self.assertEqual((forwarded["group_title"], forwarded["is_forwarded"]), ("Daegu ishlar", True))
         self.assertNotIn("Ali", json.dumps(forwarded))
+
+    def test_messages_that_are_not_job_offers_are_counted_but_not_used(self):
+        before = self.get("/api/overview")["kpis"]["unique_ads"]
+        version = self.get("/api/health")["version"]
+        self.data.append(OTHER_FILE,
+                         message(30, "Ish bormi akalar? Ertaga bosh odam bor", NOW),
+                         message(31, "7 sentabr Toshkentga uchaman, pochta bolsa olib ketaman", NOW),
+                         message(32, "Rahmat aka, tushundim", NOW))
+        deadline = time.monotonic() + 5
+        while self.get("/api/health")["version"] == version:
+            self.assertLess(time.monotonic(), deadline, "poller did not pick up the new lines")
+            time.sleep(0.02)
+        self.assertEqual(self.get("/api/overview")["kpis"]["unique_ads"], before)
+        meta = self.get("/api/meta")
+        self.assertEqual(meta["excluded"], {"job_seeker": 1, "cargo": 1, "chat": 1})
+        self.assertEqual(meta["messages"], self.get("/api/health")["posts"] + 3)
+        self.assertTrue(all(item["id"] not in {f"{OTHER_FILE}:30", f"{OTHER_FILE}:31", f"{OTHER_FILE}:32"}
+                            for item in self.get("/api/feed?limit=100")["items"]))
 
     def test_new_lines_bump_the_version(self):
         version = self.get("/api/health")["version"]

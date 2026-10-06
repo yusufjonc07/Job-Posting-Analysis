@@ -1,6 +1,6 @@
 // /: KPIs, posting volume (direct vs forwarded), top provinces and how ads are located.
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, type LabelProps } from 'recharts'
-import { useLocations, useOverview } from '../api/hooks'
+import { useLocations, useMeta, useOverview } from '../api/hooks'
 import type { Granularity, Locations, Overview } from '../api/types'
 import { BarList } from '../components/ui/BarList'
 import { Card } from '../components/ui/Card'
@@ -41,6 +41,8 @@ export function OverviewPage() {
 }
 
 function Kpis({ data }: { data: Overview }) {
+  const meta = useMeta()
+  const left = Object.values(meta.data?.excluded ?? {}).reduce((s, n) => s + n, 0)
   const k = data.kpis
   const week = relChange(k.last_7d, k.prev_7d)
   return (
@@ -49,8 +51,11 @@ function Kpis({ data }: { data: Overview }) {
         <div className="text-xs font-medium text-slate-500">Unique job ads</div>
         <div className="mt-1 text-5xl leading-none font-semibold tracking-tight text-slate-900">{fmtInt(k.unique_ads)}</div>
         <div className="mt-2 text-xs leading-5 text-slate-500">
-          from {fmtInt(k.posts)} posts — {fmtPct(k.repost_share)} were reposts of the same ad
+          from {fmtInt(k.posts)} job posts — {fmtPct(k.repost_share)} were reposts of the same ad
         </div>
+        {left > 0 && (
+          <div className="mt-1 text-xs leading-5 text-slate-500">Only job offers count: {fmtInt(left)} other messages (chat, questions, parcels, sales…) are left out.</div>
+        )}
       </div>
       <StatTile label="Last 24 hours" value={fmtInt(k.last_24h)} sub="unique ads" />
       <StatTile label="Last 7 days" value={fmtInt(k.last_7d)} delta={{ value: week, vs: 'vs previous 7 days' }} />

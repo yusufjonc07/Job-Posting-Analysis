@@ -25,11 +25,12 @@ from watchfiles import watch
 from config.settings import PROJECT_ROOT
 from src.api import extract
 from src.api.config import ApiConfig
+from src.utils.job_filter import JOB_OFFER, KINDS
 from src.utils.locations import group_id_from_source
 
 log = logging.getLogger("src.api.store")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CACHE_FILE = "snapshot.pkl"
 CHUNK_BYTES = 1 << 20          # about 2,500 lines per process-pool task
 POOL_MIN_BYTES = 4 << 20       # a catch-up larger than this uses the process pool
@@ -48,7 +49,7 @@ LOCATION_SOURCES = ("address", "text", "group", "unknown")
 PERIODS = ("hourly", "daily", "monthly")
 SCRIPTS = ("Latin", "Cyrillic", "Hangul")
 CACHE_INPUTS = (
-    "src/api/extract.py", "src/preprocess.py", "src/utils/deduplication.py", "src/utils/locations.py",
+    "src/api/extract.py", "src/preprocess.py", "src/utils/deduplication.py", "src/utils/job_filter.py", "src/utils/locations.py",
     "src/utils/post_parsing.py", "src/utils/salary.py", "src/utils/text_cleaning.py",
     "src/utils/transliteration.py",
 )
@@ -66,12 +67,14 @@ class FileState:
 @dataclass(frozen=True)
 class Snapshot:
     version: int
-    posts: pd.DataFrame          # every post with text, reposts included
-    ads: pd.DataFrame            # one representative row per unique ad, oldest first
+    messages: pd.DataFrame       # every message with text, of every kind (job offers, chat, cargo, ...)
+    posts: pd.DataFrame          # the job offers among them, reposts included
+    ads: pd.DataFrame            # one representative row per unique job ad, oldest first
     groups: pd.DataFrame         # per source_file: group_id, title, home_province, home_city
     files: int
     last_update: datetime | None
     last_post: datetime | None
+    excluded: dict[str, int] = field(default_factory=dict)   # messages that are not job offers, per kind
 
 
 @dataclass
@@ -113,6 +116,7 @@ def rows_frame(columns: dict[str, list]) -> pd.DataFrame:
         "occupations": np.asarray(columns["occupations"], dtype=np.int32),
         "visas": np.asarray(columns["visas"], dtype=np.int32),
         "excerpt": pd.Series(columns["excerpt"], dtype=object),
+        "kind": pd.Categorical(columns["kind"], categories=KINDS),
     })
     return frame
 
@@ -260,6 +264,7 @@ class Store:
             "progress": round(self.progress, 4),
             "version": snapshot.version,
             "posts": len(snapshot.posts),
+            "messages": len(snapshot.messages),
             "unique_ads": len(snapshot.ads),
             "files": snapshot.files,
             "last_update": snapshot.last_update.isoformat() if snapshot.last_update else None,
@@ -346,7 +351,7 @@ class Store:
             "version": snapshot.version,
             "last_update": snapshot.last_update,
             "files": {name: asdict(state) for name, state in self.files.items()},
-            "posts": snapshot.posts[list(extract.COLUMNS)],
+            "messages": snapshot.messages[list(extract.COLUMNS)],
         }
         self.config.cache_dir.mkdir(parents=True, exist_ok=True)
         temporary = self.cache_path.with_name(f".{CACHE_FILE}.{os.getpid()}.tmp")
@@ -383,7 +388,7 @@ class Store:
         if not valid:
             log.info("cache %s is stale, rebuilding", self.cache_path)
             return False
-        posts = payload["posts"]
+        posts = payload["messages"]
         self.files = {name: FileState(**state) for name, state in payload["files"].items()}
         self.seen = {
             name: set(ids.dropna().astype(np.int64).tolist())
@@ -495,7 +500,7 @@ class Store:
         new_bytes = sum(end - start for _, start, end, _ in ranges)
         rows = self._extract_ranges(ranges, use_pool=new_bytes >= POOL_MIN_BYTES) if ranges else empty_rows()
         old = self.snapshot
-        posts = old.posts
+        posts = old.messages
         if dropped:
             posts = posts.loc[~posts["source_file"].isin(dropped)].reset_index(drop=True)
             for name in dropped:
@@ -533,7 +538,7 @@ class Store:
         provinces = fresh["region"].value_counts()
         return {
             "version": new.version,
-            "added_posts": len(rows),
+            "added_posts": int((rows["kind"] == JOB_OFFER).sum()),
             "added_ads": len(fresh),
             "posts": len(new.posts),
             "unique_ads": len(new.ads),
@@ -543,16 +548,22 @@ class Store:
 
     # -- helpers -----------------------------------------------------------------------------
 
-    def _make_snapshot(self, version: int, posts: pd.DataFrame, last_update: datetime | None) -> Snapshot:
+    def _make_snapshot(self, version: int, messages: pd.DataFrame, last_update: datetime | None) -> Snapshot:
+        """Every statistic is computed from the job offers only; other messages are only counted."""
+        is_job = (messages["kind"] == JOB_OFFER).to_numpy()
+        posts = messages if is_job.all() else messages.loc[is_job].reset_index(drop=True)
         last_post = posts["date"].max() if len(posts) else None
+        kinds = messages.loc[~is_job, "kind"].value_counts()
         return Snapshot(
             version=version,
+            messages=messages,
             posts=posts,
             ads=unique_ads(posts),
-            groups=group_catalog(posts, self.csv_rows, list(self.files)),
+            groups=group_catalog(messages, self.csv_rows, list(self.files)),
             files=len(self.files),
             last_update=last_update,
             last_post=None if last_post is None or pd.isna(last_post) else last_post.to_pydatetime(),
+            excluded={str(kind): int(count) for kind, count in kinds.items() if count},
         )
 
     def _set_progress(self, value: float) -> None:

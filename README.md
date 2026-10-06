@@ -35,8 +35,15 @@ uvicorn src.api.main:app --port 8000                     # then open http://loca
 
 How new posts reach the page:
 
-1. The server starts the Telegram listener (`python -m src.main --listen`) as a child process and restarts it if it stops. The listener follows the source group (posts routed by their `Guruh:` link) and every group that has its own `group_-100<id>.jsonl` history (or the groups in `TELEGRAM_GROUP_IDS`). On start it fills the gap since the newest stored message of each, then Telegram pushes each new message to it and it is written to `data/raw` immediately. Every 5 minutes it re-checks the newest messages (one request per group) in case a dropped connection missed any. Messages already stored are never written again.
+1. The server starts the Telegram listener (`python -m src.main --listen`) as a child process and restarts it if it stops. It follows the source group (posts routed by their `Guruh:` link) and every group we have an id for (from `data/raw` file names and `data/telegram_groups.csv`, or `TELEGRAM_GROUP_IDS`), whether the account has joined it or not. On start each fills its gap: since its newest stored message, or, for a group read for the first time, since the newest post we have for it (at most 30 days back). Then:
+   - joined groups: Telegram pushes each new message instantly;
+   - groups the account has not joined: Telegram does not push those, so they are checked in turn, each about every 2 minutes (`--poll`), with one request that returns only newer messages;
+   - private groups the account is not in cannot be read; they are listed in the log as skipped.
+
+   A group's own messages go to `group_-100<id>.jsonl`. Every 5 minutes the newest messages of pushed chats are re-checked in case a dropped connection missed any. Messages already stored are never written again.
 2. The server notices the changed file within milliseconds, updates its in-memory statistics and pushes an update to every open page (server-sent events).
+
+Only job offers are counted. Every message is classified by `src/utils/job_filter.py` (`classify_post` / `is_job_post`: job offer, person looking for work, parcels, flights and rides, sales and rentals, courses and services, conversation), reading Uzbek in Latin and Cyrillic letters, Russian and Korean. The dashboard (statistics, map, feed, live updates) uses job offers only and shows what was left out on the Posts page; `src.preprocess.load_messages()` also returns job offers only unless called with `jobs_only=False`. `data/raw` keeps every message.
 
 The web app never calls Telegram: every page request is answered from the server's memory. Telegram lookups (group links, titles) are saved in `data/raw/.state/telegram_lookups.json` and requested only once, also across restarts. Only one crawler/listener can use the Telegram session at a time; a second one stops with a message.
 
