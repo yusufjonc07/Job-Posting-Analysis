@@ -21,7 +21,7 @@ from telethon.errors import UsernameNotOccupiedError
 
 from src import main as crawler
 from src.api.telegram import ListenerSupervisor
-from src.crawler.listen import STATUS_FILE, Router, listen
+from src.crawler.listen import STATUS_FILE, Router, direct_group_ids, listen
 from src.storage.jsonl import load_checkpoint, save_checkpoint
 from src.tdlib.cache import LookupCache
 from src.tdlib.client import TdlibClient
@@ -53,6 +53,29 @@ def post(message_id: int, group: str = "Daeso arbayt", link: str | None = LINK) 
     }
 
 
+DIRECT_ID = -1001111111111
+DIRECT_FILE = f"group_{DIRECT_ID}.jsonl"
+
+
+def direct_post(message_id: int) -> dict[str, Any]:
+    """A message written straight in a directly followed group."""
+    text = f"Mokpoda ish bor, post {message_id}"
+    raw = {
+        "_": "Message",
+        "id": message_id,
+        "peer_id": {"_": "PeerChannel", "channel_id": int(str(DIRECT_ID).removeprefix("-100"))},
+        "date": datetime.fromtimestamp(START + message_id, UTC).isoformat(sep=" "),
+        "message": text,
+    }
+    return {
+        "id": message_id,
+        "chat_id": DIRECT_ID,
+        "date": START + message_id,
+        "raw_message_json": json.dumps(raw, ensure_ascii=False),
+        "content": {"@type": "messageText", "text": {"text": text}},
+    }
+
+
 class FakeTelegram:
     """Async client double: a message history, pushed events and a connection that can drop."""
 
@@ -73,7 +96,7 @@ class FakeTelegram:
 
     async def iter_messages_async(self, chat_id: int, limit: int | None = None, min_id: int = 0):
         self.requests.append((limit, min_id))
-        newest_first = sorted((m for m in self.history if m["id"] > min_id), key=lambda m: m["id"], reverse=True)
+        newest_first = sorted((m for m in self.history if m["chat_id"] == chat_id and m["id"] > min_id), key=lambda m: m["id"], reverse=True)
         for message in self.during_history:
             self.push(message)
         self.during_history = []
@@ -172,6 +195,52 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
 
         await self.run_listener(client, script)
         self.assertFalse(status_path.exists())
+
+    async def test_direct_group_catches_up_from_its_newest_stored_message_then_gets_pushes(self):
+        self.raw.mkdir(parents=True)
+        with (self.raw / DIRECT_FILE).open("w", encoding="utf-8") as target:
+            for message_id in (1, 2, 3):
+                target.write(json.dumps(json.loads(direct_post(message_id)["raw_message_json"])) + "\n")
+        self.assertEqual(direct_group_ids(self.raw), (DIRECT_ID,))
+        client = FakeTelegram([direct_post(i) for i in range(1, 6)] + [post(10)])
+        save_checkpoint(self.checkpoint, 9)
+
+        async def script(stop):
+            client.push(direct_post(6))
+            client.push(post(11))
+            await asyncio.sleep(0.05)
+
+        stop = asyncio.Event()
+        task = asyncio.create_task(listen(client, (SOURCE_ID,), self.raw, None, 3600, self.logs.append, stop, direct_ids=(DIRECT_ID,)))
+        await asyncio.sleep(0.05)
+        await script(stop)
+        stop.set()
+        await asyncio.wait_for(task, 5)
+        direct = [json.loads(line)["id"] for line in (self.raw / DIRECT_FILE).read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(direct, [1, 2, 3, 4, 5, 6], "the gap since the newest stored message (4, 5) and the push (6)")
+        self.assertEqual(self.stored(), [10, 11], "source posts are still routed by their Guruh link")
+        self.assertIn((None, 3), client.requests, "the direct group is read only after its newest stored message")
+
+    async def test_an_inaccessible_direct_group_is_skipped_not_fatal(self):
+        client = FakeTelegram([post(1)])
+        original = client.iter_messages_async
+
+        def iter_messages(chat_id, limit=None, min_id=0):
+            if chat_id == DIRECT_ID:
+                raise ValueError("Could not find the input entity")
+            return original(chat_id, limit, min_id)
+
+        client.iter_messages_async = iter_messages
+
+        stop = asyncio.Event()
+        task = asyncio.create_task(listen(client, (SOURCE_ID,), self.raw, None, 3600, self.logs.append, stop, direct_ids=(DIRECT_ID,)))
+        await asyncio.sleep(0.05)
+        client.push(post(2))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, 5)
+        self.assertEqual(self.stored(), [1, 2])
+        self.assertTrue(any("Skipping group" in line for line in self.logs))
 
     async def test_lost_connection_ends_the_listener_with_an_error(self):
         client = FakeTelegram([])

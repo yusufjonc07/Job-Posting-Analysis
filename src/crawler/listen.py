@@ -2,6 +2,10 @@
 Telegram pushes it. Every few minutes the newest messages are re-checked (one request) so anything a
 dropped connection missed is still written.
 
+Besides the source group (whose posts are routed to the group named in each post), it follows the
+groups crawled directly before ("direct groups"): each catches up from its newest stored message and
+then gets pushed messages too, written to its own group_<id>.jsonl.
+
 A message id is never written twice: before catching up, the ids already stored in the raw files are
 read, so even a stale checkpoint (e.g. from an interrupted newest-first crawl) cannot cause re-writes.
 """
@@ -16,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from telethon.errors import BadRequestError
+from telethon.errors import BadRequestError, RPCError
 
 from src.crawler.messages import extract_referenced_group_link, extract_referenced_group_name, normalize_message, output_path
 from src.storage.jsonl import append_message_jsonl, load_checkpoint, save_checkpoint
@@ -44,6 +48,22 @@ def _now() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def direct_group_ids(raw_dir: Path, sample_lines: int = 50) -> tuple[int, ...]:
+    """Groups with a group_-100<id>.jsonl file holding the group's own messages (crawled directly)."""
+    found = []
+    for path in sorted(raw_dir.glob("group_-100*.jsonl")):
+        channel = path.stem.removeprefix("group_-100").encode()
+        with path.open("rb") as source:
+            for number, line in enumerate(source):
+                match = LINE_START.match(line)
+                if match and match.group(2) == channel:
+                    found.append(int(path.stem.removeprefix("group_")))
+                    break
+                if number >= sample_lines:
+                    break
+    return tuple(found)
+
+
 def stored_ids(raw_dir: Path, source_id: int) -> set[int]:
     """Ids of the source group's messages already in the raw files (a fast scan of each line's start)."""
     channel = str(source_id).removeprefix("-100").encode()
@@ -60,9 +80,17 @@ def stored_ids(raw_dir: Path, source_id: int) -> set[int]:
 class Router:
     """Writes source messages to their group files, each message id at most once."""
 
-    def __init__(self, client: ListenerClient, raw_dir: Path, crawl_until: int | None, log: Callable[[str], None] = print):
+    def __init__(
+        self,
+        client: ListenerClient,
+        raw_dir: Path,
+        crawl_until: int | None,
+        log: Callable[[str], None] = print,
+        direct_ids: tuple[int, ...] = (),
+    ):
         self.client = client
         self.raw_dir = raw_dir
+        self.direct = set(direct_ids)
         self.crawl_until = crawl_until
         self.log = log
         self.written: dict[int, set[int]] = {}   # ids stored in the raw files, per source
@@ -98,6 +126,22 @@ class Router:
             save_checkpoint(self.checkpoint_path(source_id), newest)  # repairs a stale checkpoint
         return len(pending)
 
+    async def catch_up_direct(self, group_id: int) -> int:
+        """Write a direct group's messages newer than its newest stored one, oldest first."""
+        self.written[group_id] = await asyncio.to_thread(stored_ids, self.raw_dir, group_id)
+        newest = max(self.written[group_id], default=0)
+        self.floor[group_id] = newest
+        pending: list[dict[str, Any]] = []
+        async for message in self.client.iter_messages_async(group_id, min_id=newest):
+            self.read += 1
+            date = message.get("date")
+            if newest == 0 and self.crawl_until is not None and date is not None and date < self.crawl_until:
+                break  # a group without stored history is only read back to CRAWL_UNTIL_DATE
+            pending.append(message)
+        for message in reversed(pending):
+            await self.save({**message, "chat_id": group_id})
+        return len(pending)
+
     async def save(self, message: dict[str, Any]) -> bool:
         """Write a message unless it is already stored; True when it was new."""
         source_id = int(message.get("chat_id", 0))
@@ -120,6 +164,13 @@ class Router:
 
     async def _write(self, source_id: int, message: dict[str, Any]) -> None:
         normalized = normalize_message(message)
+        if source_id in self.direct:
+            path = self.raw_dir / f"group_{source_id}.jsonl"
+            append_message_jsonl(path, normalized)
+            self.saved += 1
+            self.last_message_at = time.time()
+            self.log(f"[{_now()}] Saved message {normalized.message_id} -> {path.name}")
+            return
         try:
             raw_message = json.loads(normalized.raw_message_json)
         except json.JSONDecodeError:
@@ -177,11 +228,13 @@ async def listen(
     resync_seconds: float = RESYNC_SECONDS,
     log: Callable[[str], None] = print,
     stop: asyncio.Event | None = None,
+    direct_ids: tuple[int, ...] = (),
 ) -> Router:
     """Catch up, then save pushed messages until `stop` is set; raises ConnectionError when Telegram drops us."""
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-    client.on_new_message(source_ids, queue.put_nowait)  # subscribe first: nothing posted during catch-up is lost
-    router = Router(client, raw_dir, crawl_until, log)
+    chats = tuple(source_ids) + tuple(direct_ids)
+    client.on_new_message(chats, queue.put_nowait)  # subscribe first: nothing posted during catch-up is lost
+    router = Router(client, raw_dir, crawl_until, log, direct_ids)
     status = StatusFile(raw_dir / ".state" / STATUS_FILE)
     state = "catching_up"
 
@@ -198,6 +251,14 @@ async def listen(
         for source_id in source_ids:
             count = await router.catch_up(source_id)
             log(f"[{_now()}] Caught up {source_id}: {count} new message(s) since the last run")
+        for group_id in direct_ids:
+            try:
+                count = await router.catch_up_direct(group_id)
+            except (ValueError, RPCError) as error:  # left the group, or Telegram does not know it any more
+                log(f"[{_now()}] Skipping group {group_id}: {error}")
+                chats = tuple(chat for chat in chats if chat != group_id)
+                continue
+            log(f"[{_now()}] Caught up group {group_id}: {count} new message(s) since its last stored one")
         state = "listening"
         status.write(state, router)
         log(f"[{_now()}] Listening for new messages (re-check every {int(resync_seconds)} s); press Ctrl+C to stop.")
@@ -216,8 +277,11 @@ async def listen(
             if client.disconnected in done:
                 raise ConnectionError("lost the connection to Telegram")
             if loop.time() >= next_resync:
-                for source_id in source_ids:
-                    await router.resync(source_id)
+                for chat_id in chats:
+                    try:
+                        await router.resync(chat_id)
+                    except (ValueError, RPCError) as error:
+                        log(f"[{_now()}] Re-check of {chat_id} failed, trying again next time: {error}")
                 next_resync = loop.time() + resync_seconds
     finally:
         beating.cancel()

@@ -17,7 +17,7 @@ if __package__ in {None, ""}:
 from telethon.errors import BadRequestError
 
 from config.settings import settings
-from src.crawler.listen import RESYNC_SECONDS, listen
+from src.crawler.listen import RESYNC_SECONDS, direct_group_ids, listen
 from src.crawler.messages import (
     extract_referenced_group_link,
     extract_referenced_group_name,
@@ -262,7 +262,13 @@ async def run_listener(resync_seconds: int) -> int:
             raise ValueError(f"Source group not found: {settings.source_group_title!r}")
         for group_id in group_ids:
             print(f"Source group: {await client.get_group_title_async(group_id)} ({group_id})", flush=True)
-        await listen(client, group_ids, settings.raw_data_dir, settings.crawl_until_timestamp, resync_seconds)
+        direct_ids = settings.telegram_group_ids or direct_group_ids(settings.raw_data_dir)
+        direct_ids = tuple(group_id for group_id in direct_ids if group_id not in group_ids)
+        for group_id in direct_ids:
+            print(f"Direct group: {await client.get_group_title_async(group_id)} ({group_id})", flush=True)
+        await listen(
+            client, group_ids, settings.raw_data_dir, settings.crawl_until_timestamp, resync_seconds, direct_ids=direct_ids
+        )
         return 0
     finally:
         await client.close_async()
