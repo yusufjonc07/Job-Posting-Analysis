@@ -1,0 +1,135 @@
+@import 'tailwindcss';
+
+/* Design tokens (mirrored in src/lib/palette.ts for charts). Use e.g. bg-series-1, text-ink-2, fill-map-4. */
+@theme static {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif;
+
+  --color-series-1: #2a78d6;
+  --color-series-2: #eb6834;
+  --color-series-3: #1baf7a;
+  --color-series-4: #eda100;
+  --color-context: #c3c2b7;
+
+  --color-ink: #0f172a;
+  --color-ink-2: #475569;
+  --color-muted: #64748b;
+  --color-grid: #e2e8f0;
+
+  --color-map-zero: #eef2f7;
+  --color-map-1: #cde2fb;
+  --color-map-2: #9ec5f4;
+  --color-map-3: #6da7ec;
+  --color-map-4: #3987e5;
+  --color-map-5: #256abf;
+  --color-map-6: #184f95;
+  --color-map-7: #0d366b;
+
+  --shadow-glass: 0 8px 30px rgba(30, 64, 175, 0.08);
+  --shadow-glass-lg: 0 16px 48px rgba(30, 64, 175, 0.14);
+
+  --animate-pulse-ring: pulse-ring 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-slide-in: slide-in 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  --animate-fade-in: fade-in 0.25s ease-out both;
+  --animate-toast-in: toast-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+
+  @keyframes pulse-ring {
+    0% {
+      transform: scale(1);
+      opacity: 0.55;
+    }
+    80%,
+    100% {
+      transform: scale(2.4);
+      opacity: 0;
+    }
+  }
+  @keyframes slide-in {
+    from {
+      opacity: 0;
+      transform: translateY(-8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+      transform: translateY(12px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}
+
+/* Frosted-glass panel: cards, sidebars, top bar. */
+@utility glass {
+  background-color: rgb(255 255 255 / 0.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  backdrop-filter: blur(24px) saturate(1.4);
+  border: 1px solid rgb(255 255 255 / 0.7);
+  box-shadow: var(--shadow-glass);
+  border-radius: 1rem;
+}
+
+/* Denser glass for floating layers (tooltips, drawers, toasts) that sit over content. */
+@utility glass-strong {
+  background-color: rgb(255 255 255 / 0.86);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  backdrop-filter: blur(20px) saturate(1.5);
+  border: 1px solid rgb(255 255 255 / 0.9);
+  box-shadow: var(--shadow-glass-lg);
+}
+
+/* Thin, unobtrusive scrollbars inside panels. */
+@utility scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(148 163 184 / 0.45) transparent;
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply min-h-dvh bg-sky-50 font-sans text-ink;
+  }
+  :focus-visible {
+    outline: 2px solid #3b82f6;
+    outline-offset: 2px;
+  }
+  /* Numbers that line up in columns (tables, axis ticks). */
+  table,
+  .recharts-cartesian-axis-tick {
+    font-variant-numeric: tabular-nums;
+  }
+  .recharts-wrapper:focus,
+  .recharts-surface:focus,
+  .recharts-wrapper *:focus {
+    outline: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
