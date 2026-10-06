@@ -49,6 +49,15 @@ function ListenerLine({ status, now }: { status: ListenerStatus; now: number }) 
         {status.state === 'catching_up' && (status.catch_up_read ?? 0) > 0 && (
           <span className="block text-slate-500">{fmtInt(status.catch_up_read ?? 0)} messages read</span>
         )}
+        {status.groups && status.state === 'listening' && (
+          <span
+            className="block text-slate-500"
+            title="Joined groups are pushed instantly; groups the account has not joined are checked in turn; private groups you are not in cannot be read."
+          >
+            {fmtInt(status.groups.live + status.groups.polled)} groups: {fmtInt(status.groups.live)} live, {fmtInt(status.groups.polled)} checked every ~2 min
+            {status.groups.skipped > 0 && `, ${fmtInt(status.groups.skipped)} private skipped`}
+          </span>
+        )}
         {status.last_message_at && <span className="block text-slate-500">last post saved {fmtRelative(status.last_message_at, now)}</span>}
       </span>
     </div>

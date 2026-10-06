@@ -115,6 +115,34 @@ class TdlibClient:
             if dialog.is_group and dialog.name.strip().casefold() == expected:
                 yield dialog.id
 
+    async def joined_chat_ids_async(self) -> set[int]:
+        """IDs of every group and channel the account is a member of (Telegram pushes only these)."""
+        dialogs = await self._client.get_dialogs()
+        return {dialog.id for dialog in dialogs if dialog.is_group or dialog.is_channel}
+
+    async def can_read_async(self, chat_id: int) -> bool:
+        """True when the chat's messages can be requested without joining it.
+
+        Checks the session first (no request); otherwise resolves the chat's public username, if a link
+        to it was seen, once: Telethon keeps it in the session, so later runs need no request.
+        """
+        try:
+            await self._client.get_input_entity(chat_id)
+            return True
+        except (ValueError, TypeError):
+            pass
+        bare_id = int(str(chat_id).removeprefix("-100"))
+        for link, linked_id in self._resolved_group_links.items():
+            parsed = parse_group_link(link)
+            if linked_id not in (chat_id, bare_id) or parsed is None or parsed[0] != "username":
+                continue
+            try:
+                await self._client.get_entity(parsed[1])
+                return True
+            except (ValueError, BadRequestError):
+                continue
+        return False
+
     async def group_ids_by_title_async(self, title: str) -> list[int]:
         """Joined group IDs whose title matches case-insensitively, from a running loop."""
         expected = title.strip().casefold()

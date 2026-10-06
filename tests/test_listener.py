@@ -21,7 +21,7 @@ from telethon.errors import UsernameNotOccupiedError
 
 from src import main as crawler
 from src.api.telegram import ListenerSupervisor
-from src.crawler.listen import STATUS_FILE, Router, direct_group_ids, listen
+from src.crawler.listen import STATUS_FILE, Router, known_group_ids, listen
 from src.storage.jsonl import load_checkpoint, save_checkpoint
 from src.tdlib.cache import LookupCache
 from src.tdlib.client import TdlibClient
@@ -201,7 +201,7 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         with (self.raw / DIRECT_FILE).open("w", encoding="utf-8") as target:
             for message_id in (1, 2, 3):
                 target.write(json.dumps(json.loads(direct_post(message_id)["raw_message_json"])) + "\n")
-        self.assertEqual(direct_group_ids(self.raw), (DIRECT_ID,))
+        self.assertIn(DIRECT_ID, known_group_ids(self.raw))
         client = FakeTelegram([direct_post(i) for i in range(1, 6)] + [post(10)])
         save_checkpoint(self.checkpoint, 9)
 
@@ -211,7 +211,7 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.05)
 
         stop = asyncio.Event()
-        task = asyncio.create_task(listen(client, (SOURCE_ID,), self.raw, None, 3600, self.logs.append, stop, direct_ids=(DIRECT_ID,)))
+        task = asyncio.create_task(listen(client, (SOURCE_ID,), self.raw, None, 3600, self.logs.append, stop, live_ids=(DIRECT_ID,)))
         await asyncio.sleep(0.05)
         await script(stop)
         stop.set()
@@ -220,6 +220,28 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(direct, [1, 2, 3, 4, 5, 6], "the gap since the newest stored message (4, 5) and the push (6)")
         self.assertEqual(self.stored(), [10, 11], "source posts are still routed by their Guruh link")
         self.assertIn((None, 3), client.requests, "the direct group is read only after its newest stored message")
+
+    async def test_group_not_joined_is_backfilled_to_its_cutoff_then_checked_in_turn(self):
+        # No direct history: read back only to `since` (the newest post we had for it), then poll.
+        client = FakeTelegram([direct_post(i) for i in range(1, 7)])
+        status_path = self.raw / ".state" / STATUS_FILE
+        stop = asyncio.Event()
+        with mock.patch("src.crawler.listen.MIN_POLL_SPACING", 0.05):
+            task = asyncio.create_task(listen(
+                client, (SOURCE_ID,), self.raw, None, 3600, self.logs.append, stop,
+                polled_ids=(DIRECT_ID,), poll_seconds=0.1, since={DIRECT_ID: START + 4},
+            ))
+            await asyncio.sleep(0.1)
+            client.history.append(direct_post(7))   # never pushed: the account is not a member
+            await asyncio.sleep(0.4)
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            stop.set()
+            await asyncio.wait_for(task, 5)
+        direct = [json.loads(line)["id"] for line in (self.raw / DIRECT_FILE).read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(direct, [5, 6, 7], "posts after the cutoff, then the polled one; nothing older")
+        self.assertEqual(status["groups"], {"live": 0, "polled": 1, "skipped": 0})
+        polls = [request for request in client.requests if request == (None, 6)]
+        self.assertTrue(polls, "a check asks only for messages newer than the newest stored one")
 
     async def test_an_inaccessible_direct_group_is_skipped_not_fatal(self):
         client = FakeTelegram([post(1)])
@@ -233,7 +255,7 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         client.iter_messages_async = iter_messages
 
         stop = asyncio.Event()
-        task = asyncio.create_task(listen(client, (SOURCE_ID,), self.raw, None, 3600, self.logs.append, stop, direct_ids=(DIRECT_ID,)))
+        task = asyncio.create_task(listen(client, (SOURCE_ID,), self.raw, None, 3600, self.logs.append, stop, polled_ids=(DIRECT_ID,)))
         await asyncio.sleep(0.05)
         client.push(post(2))
         await asyncio.sleep(0.05)
@@ -249,6 +271,17 @@ class ListenerTests(unittest.IsolatedAsyncioTestCase):
         client.disconnected.set_result(None)
         with self.assertRaises(ConnectionError):
             await asyncio.wait_for(task, 5)
+
+
+class KnownGroupsTests(unittest.TestCase):
+    def test_ids_come_from_file_names_and_the_groups_csv(self):
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory)
+            for name in ("group_-1001111111111.jsonl", "group_2222222222.jsonl", "group_unmatched_Some_group.jsonl"):
+                (raw / name).write_text("", encoding="utf-8")
+            groups_csv = raw / "groups.csv"
+            groups_csv.write_text("group_id,group_title,message_count,last_msg_date,province,city\n-1003333333333,X,1,,,\n", encoding="utf-8")
+            self.assertEqual(known_group_ids(raw, groups_csv), (-1003333333333, -1002222222222, -1001111111111))
 
 
 class LookupCacheTests(unittest.IsolatedAsyncioTestCase):
@@ -281,6 +314,24 @@ class LookupCacheTests(unittest.IsolatedAsyncioTestCase):
                 again = TdlibClient(1, "hash", "+1", Path(directory) / "tdlib", cache=LookupCache(path))
                 self.assertIsNone(await again.resolve_group_link_async("https://t.me/gone_group"))
                 self.assertEqual(telethon.get_entity.await_count, 1)
+
+
+class CanReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_known_to_the_session_needs_no_request_else_the_public_username_is_resolved_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = LookupCache(Path(directory) / "telegram_lookups.json")
+            cache.set_link("https://t.me/public_jobs", 5555555555)
+            telethon = mock.MagicMock()
+            known = {-1004444444444}
+            telethon.get_input_entity = mock.AsyncMock(side_effect=lambda chat: chat if chat in known else (_ for _ in ()).throw(ValueError("unknown")))
+            telethon.get_entity = mock.AsyncMock(return_value=mock.Mock(id=5555555555))
+            with mock.patch("src.tdlib.client.TelegramClient", return_value=telethon):
+                client = TdlibClient(1, "hash", "+1", Path(directory) / "tdlib", cache=cache)
+                self.assertTrue(await client.can_read_async(-1004444444444))
+                self.assertEqual(telethon.get_entity.await_count, 0, "a chat in the session needs no request")
+                self.assertTrue(await client.can_read_async(-1005555555555))
+                telethon.get_entity.assert_awaited_once_with("public_jobs")
+                self.assertFalse(await client.can_read_async(-1006666666666), "private and unknown: cannot be read")
 
 
 class SessionLockTests(unittest.TestCase):

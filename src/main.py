@@ -16,8 +16,8 @@ if __package__ in {None, ""}:
 
 from telethon.errors import BadRequestError
 
-from config.settings import settings
-from src.crawler.listen import RESYNC_SECONDS, direct_group_ids, listen
+from config.settings import PROJECT_ROOT, settings
+from src.crawler.listen import BACKFILL_DAYS, POLL_SECONDS, RESYNC_SECONDS, known_group_ids, listen, newest_post_dates
 from src.crawler.messages import (
     extract_referenced_group_link,
     extract_referenced_group_name,
@@ -31,6 +31,8 @@ from src.tdlib.client import TdlibClient
 
 MIN_INTERVAL_SECONDS = 30
 MIN_RESYNC_SECONDS = 60
+MIN_POLL_SECONDS = 30
+GROUPS_CSV = PROJECT_ROOT / "data" / "telegram_groups.csv"
 EXIT_LOCKED = 2
 EXIT_NOT_LOGGED_IN = 3
 
@@ -56,6 +58,17 @@ def _resync_seconds(value: str) -> int:
         raise argparse.ArgumentTypeError(f"expected whole seconds, got {value!r}") from None
     if seconds < MIN_RESYNC_SECONDS:
         raise argparse.ArgumentTypeError(f"must be at least {MIN_RESYNC_SECONDS} seconds, got {seconds}")
+    return seconds
+
+
+def _poll_seconds(value: str) -> int:
+    """Parse --poll, refusing checks of the same group more often than every 30 s."""
+    try:
+        seconds = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected whole seconds, got {value!r}") from None
+    if seconds < MIN_POLL_SECONDS:
+        raise argparse.ArgumentTypeError(f"must be at least {MIN_POLL_SECONDS} seconds, got {seconds}")
     return seconds
 
 
@@ -86,6 +99,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=RESYNC_SECONDS,
         metavar="SECONDS",
         help=f"with --listen: re-check the newest messages this often (default {RESYNC_SECONDS})",
+    )
+    parser.add_argument(
+        "--poll",
+        type=_poll_seconds,
+        default=POLL_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "with --listen: check each group the account has not joined about this often "
+            f"(default {POLL_SECONDS}; joined groups are pushed instantly)"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -242,7 +265,17 @@ def acquire_session_lock():
     return handle
 
 
-async def run_listener(resync_seconds: int) -> int:
+def group_titles() -> dict[int, str]:
+    """Titles from telegram_groups.csv, for readable log lines (no Telegram request)."""
+    if not GROUPS_CSV.is_file():
+        return {}
+    import csv
+
+    with GROUPS_CSV.open(encoding="utf-8") as source:
+        return {int(row["group_id"]): row.get("group_title") or "" for row in csv.DictReader(source) if row.get("group_id")}
+
+
+async def run_listener(resync_seconds: int, poll_seconds: int = POLL_SECONDS) -> int:
     """Listen until Ctrl+C or a lost connection; never prompts for a login code."""
     client = new_client()
     try:
@@ -262,12 +295,37 @@ async def run_listener(resync_seconds: int) -> int:
             raise ValueError(f"Source group not found: {settings.source_group_title!r}")
         for group_id in group_ids:
             print(f"Source group: {await client.get_group_title_async(group_id)} ({group_id})", flush=True)
-        direct_ids = settings.telegram_group_ids or direct_group_ids(settings.raw_data_dir)
-        direct_ids = tuple(group_id for group_id in direct_ids if group_id not in group_ids)
-        for group_id in direct_ids:
-            print(f"Direct group: {await client.get_group_title_async(group_id)} ({group_id})", flush=True)
+        known = settings.telegram_group_ids or known_group_ids(settings.raw_data_dir, GROUPS_CSV)
+        known = tuple(group_id for group_id in known if group_id not in group_ids)
+        joined = await client.joined_chat_ids_async()
+        live = tuple(group_id for group_id in known if group_id in joined)
+        polled, unreadable = [], []
+        for group_id in known:
+            if group_id not in joined:
+                (polled if await client.can_read_async(group_id) else unreadable).append(group_id)
+        titles = group_titles()
+        print(
+            f"Following {len(known)} groups: {len(live)} joined (pushed live), {len(polled)} not joined but public "
+            f"(checked about every {poll_seconds} s), {len(unreadable)} private and not joined (skipped)",
+            flush=True,
+        )
+        for group_id in unreadable:
+            print(f"  skipped (private, join it to follow): {titles.get(group_id) or group_id} ({group_id})", flush=True)
+
+        oldest = time.time() - BACKFILL_DAYS * 86_400
+        dates = await asyncio.to_thread(newest_post_dates, settings.raw_data_dir)
+        since = {group_id: max(dates.get(group_id, oldest), oldest) for group_id in known}
         await listen(
-            client, group_ids, settings.raw_data_dir, settings.crawl_until_timestamp, resync_seconds, direct_ids=direct_ids
+            client,
+            group_ids,
+            settings.raw_data_dir,
+            settings.crawl_until_timestamp,
+            resync_seconds,
+            live_ids=live,
+            polled_ids=tuple(polled),
+            poll_seconds=poll_seconds,
+            since=since,
+            skipped=len(unreadable),
         )
         return 0
     finally:
@@ -285,7 +343,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         if args.listen:
             try:
-                code = asyncio.run(run_listener(args.resync))
+                code = asyncio.run(run_listener(args.resync, args.poll))
             except KeyboardInterrupt:
                 print("\nListener stopped.", flush=True)
                 code = 0

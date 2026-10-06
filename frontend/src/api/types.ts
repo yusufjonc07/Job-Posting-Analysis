@@ -47,6 +47,8 @@ export interface ListenerStatus {
   messages_saved: number
   /** Messages read so far while catching up after a start. */
   catch_up_read?: number
+  /** Groups followed besides the source: pushed live (joined), checked periodically (not joined), skipped (private). */
+  groups?: { live: number; polled: number; skipped: number } | null
   last_message_at: string | null
 }
 export interface Health {
