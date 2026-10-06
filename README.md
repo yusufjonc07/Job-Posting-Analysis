@@ -63,25 +63,24 @@ Every `t.me` link in the posts is collected. For each public group or channel no
 
 ## Deploy
 
-The dashboard (frontend) runs on **Vercel**; the backend runs as one **Docker** container on any always-on server with a disk (a VPS, Railway, Render, Fly.io). The backend cannot run on Vercel: the Telegram listener must stay connected all the time and keep its session file, and the server keeps all posts in memory. On Vercel, a small proxy (`frontend/api/backend.ts`) forwards `/api/*` to the backend, so the browser only talks to your Vercel site (the Telegram login cookie and live updates keep working).
+The whole app (the dashboard, its API and the Telegram listener) is **one Docker container**: the image builds the React dashboard and the FastAPI server serves it at `/`, next to `/api`. Run it on any always-on machine with a disk (a VPS, Railway, Render, Fly.io). It cannot run on Vercel: the posts (`data/`, 450 MB) are not in git, and the listener must stay connected and keep writing new posts, which serverless functions cannot do.
 
-**1. Backend (Docker)**
-
-Copy the repository, your `data/` folder (`raw/`, `tdlib/` with the Telegram session, `telegram_groups.csv`) and `.env` to the server, then:
+**On a server with Docker (VPS)**
 
 ```bash
-docker compose up -d --build                                          # http://<server>:8000
-DOMAIN=api.example.com docker compose --profile https up -d --build   # or with automatic HTTPS (DNS record needed)
+git clone https://github.com/yusufjonc07/ishbaroka && cd ishbaroka
+# copy your data/ folder (raw/, tdlib/ with the Telegram session, telegram_groups.csv) and .env here, e.g. with rsync
+echo "API_WORKERS=2" >> .env                                          # keeps the first data load within 2 GB RAM
+DOMAIN=api.example.com docker compose --profile https up -d --build   # https://api.example.com (DNS record needed)
+docker compose up -d --build                                          # or plain http://<server>:8000
 ```
 
-No Telegram session on the server yet? Log in once interactively: `docker compose run --rm dashboard python -m src.main`. On Railway / Render / Fly.io, deploy the `Dockerfile`, attach a volume at `/app/data`, copy your data to it and set the variables from `.env` plus `DASHBOARD_SECURE_COOKIE=1`. Run a single instance: one Telegram session cannot be shared.
+No domain? `DOMAIN=<server-ip-with-dashes>.sslip.io` (e.g. `1-2-3-4.sslip.io`) still gets a real HTTPS certificate. No Telegram session on the server yet? Log in once: `docker compose run --rm dashboard python -m src.main`.
 
-**2. Frontend (Vercel)**
+**On Railway / Render / Fly.io**: deploy the repository (they build the `Dockerfile`), attach a volume at `/app/data`, copy your data into it, and set the variables from `.env` plus `DASHBOARD_SECURE_COOKIE=1`.
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fyusufjonc07%2FJob-Posting-Analysis&root-directory=frontend&env=BACKEND_URL&envDescription=HTTPS%20address%20of%20the%20dashboard%20backend%2C%20e.g.%20https%3A%2F%2Fapi.example.com)
+Run **one** instance only, and stop the server on your own computer first: two copies using the same Telegram session at once can make Telegram revoke it.
 
-Or in the Vercel dashboard: **Add New Project** → import the repository → **Root Directory: `frontend`** → environment variable `BACKEND_URL=https://api.example.com` → **Deploy**. Build settings come from `frontend/vercel.json`.
+**Telegram login on your domain**: the bot login works right away. For the official Telegram login button too, send `/setdomain` to @BotFather with your domain and set `TELEGRAM_LOGIN_DOMAIN` to it.
 
-**3. Telegram login on your domain**
-
-The bot login (deep link) works right away. For the official Telegram login button as well, send `/setdomain` to @BotFather with your Vercel domain and set `TELEGRAM_LOGIN_DOMAIN=<your-app>.vercel.app` on the backend. Live updates through Vercel reconnect by themselves every few minutes (Vercel ends long-running responses); nothing is missed.
+**Optional: dashboard on Vercel.** If you want the pages on Vercel's CDN, import the repository with **Root Directory `frontend`** and set `BACKEND_URL` to the container's https address; `frontend/api/backend.ts` forwards `/api/*` to it.

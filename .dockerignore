@@ -4,7 +4,10 @@
 **/__pycache__
 data
 results
-frontend
+frontend/node_modules
+frontend/dist
+frontend/.vercel
+frontend/.env*
 tests
 src/notebooks
 src/autolabeling

@@ -1,6 +1,16 @@
-# The dashboard API and the Telegram listener in one container.
+# One container for everything: the dashboard (built React app), its API and the Telegram listener.
 # Data lives outside the image, in a volume at /app/data: raw/ (crawled posts), tdlib/ (Telegram session),
 # cache/ (snapshot + login cookie key) and telegram_groups.csv.
+
+# 1. Build the dashboard.
+FROM node:22-slim AS frontend
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build
+
+# 2. The Python server, which also serves the built dashboard at /.
 FROM python:3.14-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -14,6 +24,7 @@ RUN pip install -r requirements-server.txt
 
 COPY config ./config
 COPY src ./src
+COPY --from=frontend /frontend/dist ./frontend/dist
 
 RUN useradd --create-home --uid 1000 app && mkdir -p /app/data && chown app /app/data
 USER app
