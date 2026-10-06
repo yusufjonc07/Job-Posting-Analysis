@@ -1,0 +1,11 @@
+.git
+.venv
+.env
+**/__pycache__
+data
+results
+frontend
+tests
+src/notebooks
+src/autolabeling
+*.ipynb

@@ -60,3 +60,28 @@ python -m src.discover_groups --level 3   # also check groups linked from checke
 ```
 
 Every `t.me` link in the posts is collected. For each public group or channel not followed yet, its last 100 messages are read (one request) and classified; a group with at least 5 job offers that was active in the last 30 days is added to `data/telegram_groups.csv` with an empty province and city (assign them later; restart the server afterwards so existing posts are re-located) and its checked messages are saved to `data/raw`. The listener starts following added groups within 30 seconds. Links in our data are level 1; the links found in the messages of a checked group (added or not) are the next level, up to `--level` (default 3, `1` = no recursion). They cost no extra request and wait in the discovery state when a run's `--limit` is used up; all levels are checked most mentioned first. Each link is checked once (results in `data/raw/.state/discovery.json`; rejected links again after 30 days); private invite links cannot be checked without joining. Telegram limits username lookups, so a run stops at a long flood wait and the next run continues. While the listener runs it holds the Telegram session, so the command asks the listener to do the check (results appear in the server log); the listener also runs it by itself once a day (`DISCOVER_EVERY_HOURS`, `0` turns that off). Options: `--limit`, `--min-jobs`, `--min-mentions`, `--dry-run`.
+
+## Deploy
+
+The dashboard (frontend) runs on **Vercel**; the backend runs as one **Docker** container on any always-on server with a disk (a VPS, Railway, Render, Fly.io). The backend cannot run on Vercel: the Telegram listener must stay connected all the time and keep its session file, and the server keeps all posts in memory. On Vercel, a small proxy (`frontend/api/backend.ts`) forwards `/api/*` to the backend, so the browser only talks to your Vercel site (the Telegram login cookie and live updates keep working).
+
+**1. Backend (Docker)**
+
+Copy the repository, your `data/` folder (`raw/`, `tdlib/` with the Telegram session, `telegram_groups.csv`) and `.env` to the server, then:
+
+```bash
+docker compose up -d --build                                          # http://<server>:8000
+DOMAIN=api.example.com docker compose --profile https up -d --build   # or with automatic HTTPS (DNS record needed)
+```
+
+No Telegram session on the server yet? Log in once interactively: `docker compose run --rm dashboard python -m src.main`. On Railway / Render / Fly.io, deploy the `Dockerfile`, attach a volume at `/app/data`, copy your data to it and set the variables from `.env` plus `DASHBOARD_SECURE_COOKIE=1`. Run a single instance: one Telegram session cannot be shared.
+
+**2. Frontend (Vercel)**
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fyusufjonc07%2FJob-Posting-Analysis&root-directory=frontend&env=BACKEND_URL&envDescription=HTTPS%20address%20of%20the%20dashboard%20backend%2C%20e.g.%20https%3A%2F%2Fapi.example.com)
+
+Or in the Vercel dashboard: **Add New Project** → import the repository → **Root Directory: `frontend`** → environment variable `BACKEND_URL=https://api.example.com` → **Deploy**. Build settings come from `frontend/vercel.json`.
+
+**3. Telegram login on your domain**
+
+The bot login (deep link) works right away. For the official Telegram login button as well, send `/setdomain` to @BotFather with your Vercel domain and set `TELEGRAM_LOGIN_DOMAIN=<your-app>.vercel.app` on the backend. Live updates through Vercel reconnect by themselves every few minutes (Vercel ends long-running responses); nothing is missed.

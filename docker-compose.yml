@@ -1,0 +1,32 @@
+# Run the backend on a server:  docker compose up -d --build
+# With HTTPS on your own domain: DOMAIN=api.example.com docker compose --profile https up -d --build
+services:
+  dashboard:
+    build: .
+    env_file: .env
+    environment:
+      DASHBOARD_SECURE_COOKIE: "1"       # cookies only over https (the Vercel site is https)
+    volumes:
+      - ./data:/app/data                 # raw posts, Telegram session, cache, telegram_groups.csv
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  # Optional: automatic HTTPS certificates for BACKEND_URL (needs a DNS record pointing at this server).
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to the backend host name, e.g. api.example.com}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - dashboard
+    restart: unless-stopped
+
+volumes:
+  caddy-data:

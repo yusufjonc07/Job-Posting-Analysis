@@ -1,0 +1,6 @@
+{$DOMAIN} {
+	# Live updates (server-sent events) are streamed as they come.
+	reverse_proxy dashboard:8000 {
+		flush_interval -1
+	}
+}
