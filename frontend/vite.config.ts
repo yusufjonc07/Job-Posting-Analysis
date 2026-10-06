@@ -28,6 +28,20 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   customLogger: logger,
   cacheDir: process.env.VITE_CACHE_DIR ?? 'node_modules/.vite',
+  build: {
+    rolldownOptions: {
+      output: {
+        // Libraries in their own long-cacheable files; each page is loaded on demand (React.lazy in App.tsx).
+        codeSplitting: {
+          groups: [
+            { name: 'react', test: /node_modules[\\/](react|react-dom|react-router|scheduler)[\\/]/, priority: 30 },
+            { name: 'charts', test: /node_modules[\\/](recharts|d3-[^\\/]+|victory-vendor|internmap|es-toolkit|decimal\.js-light|immer|reselect|redux|@reduxjs|react-redux|use-sync-external-store|eventemitter3|tiny-invariant|react-is)[\\/]/, priority: 20 },
+            { name: 'vendor', test: /node_modules/, priority: 10 },
+          ],
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       '/api': {

@@ -24,6 +24,7 @@ export function fmtCompact(n: number | null | undefined): string {
 export function fmtPct(share: number | null | undefined, digits?: 0 | 1): string {
   if (!isNum(share)) return DASH
   const pct = share * 100
+  if (pct > 0 && pct < 0.05) return '<0.1%'
   const d = digits ?? (Math.abs(pct) < 10 && pct !== 0 ? 1 : 0)
   return `${pct.toFixed(d).replace(/\.0$/, '')}%`
 }

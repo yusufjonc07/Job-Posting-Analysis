@@ -37,7 +37,8 @@ export function useHealth(): UseQueryResult<Health, ApiError> {
     staleTime: 5_000,
     retry: (count, error) => !isOfflineError(error) && count < 1,
     retryDelay: 1000,
-    refetchInterval: (q) => (q.state.data?.status === 'loading' ? 1500 : false),
+    // Fast while loading; otherwise every 30 s so the Telegram listener state stays current.
+    refetchInterval: (q) => (q.state.data?.status === 'loading' ? 1500 : 30_000),
   })
 }
 

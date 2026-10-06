@@ -1,24 +1,72 @@
 """Telegram client boundary used by the crawler."""
 
-from collections.abc import Iterator
+import asyncio
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import datetime
 import json
 import re
 from pathlib import Path
 from typing import Any
 
+from telethon import events
+from telethon.errors import BadRequestError
 from telethon.sync import TelegramClient
+
+from src.tdlib.cache import LookupCache
+
+
+def parse_group_link(link: str) -> tuple[str, int | str] | None:
+    """('id', chat_id) for t.me/c/<id> links, ('username', name) for public links, else None."""
+    direct_match = re.search(r"(?:t\.me|telegram\.me)/c/(\d+)", link)
+    if direct_match:
+        return "id", int(f"-100{direct_match.group(1)}")
+    username_match = re.search(r"(?:t\.me|telegram\.me)/([A-Za-z0-9_]+)", link)
+    return ("username", username_match.group(1)) if username_match else None
+
+
+def message_dict(message: Any, chat_id: int) -> dict[str, Any]:
+    """A Telethon message in the shape expected by the crawler."""
+    raw_message = message.to_dict()
+    reply_to = getattr(message, "reply_to", None)
+    return {
+        "id": message.id,
+        "chat_id": chat_id,
+        "date": int(message.date.timestamp()) if isinstance(message.date, datetime) else None,
+        "message_user_id": message.sender_id,
+        "reply_to_message_id": getattr(reply_to, "reply_to_msg_id", None),
+        "edit_date": int(message.edit_date.timestamp()) if isinstance(message.edit_date, datetime) else None,
+        "views": message.views,
+        "forwards": message.forwards,
+        "media_type": type(message.media).__name__ if message.media is not None else "",
+        "raw_message_json": json.dumps(raw_message, default=str, ensure_ascii=False),
+        "content": {
+            "@type": "messageText",
+            "text": {"text": message.message or ""},
+        },
+    }
 
 
 class TdlibClient:
-    """Manage a persistent Telegram user session and expose crawler operations."""
+    """Manage a persistent Telegram user session and expose crawler operations.
 
-    def __init__(self, api_id: int, api_hash: str, phone_number: str, database_directory: Path) -> None:
+    With a LookupCache, link resolutions and group titles are kept on disk, so Telegram is asked
+    for each of them only once, also across runs.
+    """
+
+    def __init__(
+        self,
+        api_id: int,
+        api_hash: str,
+        phone_number: str,
+        database_directory: Path,
+        cache: LookupCache | None = None,
+    ) -> None:
         session_directory = Path(database_directory)
         session_directory.mkdir(parents=True, exist_ok=True)
         self._phone_number = phone_number
         self._client = TelegramClient(str(session_directory / "telegram"), api_id, api_hash)
-        self._resolved_group_links: dict[str, int | None] = {}
+        self._cache = cache
+        self._resolved_group_links: dict[str, int | None] = dict(cache.links) if cache else {}
 
     def start(self) -> None:
         """Start the client connection."""
@@ -31,6 +79,16 @@ class TdlibClient:
         if not self._phone_number.strip():
             raise ValueError("TELEGRAM_PHONE_NUMBER must not be empty")
         await self._client.start(phone=self._phone_number)
+
+    async def connect_authorized_async(self) -> bool:
+        """Connect without ever prompting for a login code; False when the session is not logged in."""
+        await self._client.connect()
+        return await self._client.is_user_authorized()
+
+    @property
+    def disconnected(self) -> asyncio.Future:
+        """Resolves when the connection to Telegram is lost for good."""
+        return self._client.disconnected
 
     def iter_joined_group_ids(self) -> Iterator[int]:
         """Yield IDs for all groups and supergroups joined by the account."""
@@ -57,10 +115,31 @@ class TdlibClient:
             if dialog.is_group and dialog.name.strip().casefold() == expected:
                 yield dialog.id
 
+    async def group_ids_by_title_async(self, title: str) -> list[int]:
+        """Joined group IDs whose title matches case-insensitively, from a running loop."""
+        expected = title.strip().casefold()
+        dialogs = await self._client.get_dialogs()
+        return [dialog.id for dialog in dialogs if dialog.is_group and dialog.name.strip().casefold() == expected]
+
     def get_group_title(self, chat_id: int) -> str:
         """Return a human-readable title for a group ID."""
+        if self._cache and (cached := self._cache.title(chat_id)):
+            return cached
         entity = self._client.get_entity(chat_id)
-        return str(getattr(entity, "title", None) or getattr(entity, "first_name", None) or chat_id)
+        return self._remember_title(chat_id, entity)
+
+    async def get_group_title_async(self, chat_id: int) -> str:
+        """Return a group title from an already-running asyncio loop."""
+        if self._cache and (cached := self._cache.title(chat_id)):
+            return cached
+        entity = await self._client.get_entity(chat_id)
+        return self._remember_title(chat_id, entity)
+
+    def _remember_title(self, chat_id: int, entity: Any) -> str:
+        title = str(getattr(entity, "title", None) or getattr(entity, "first_name", None) or chat_id)
+        if self._cache:
+            self._cache.set_title(chat_id, title)
+        return title
 
     def resolve_group_link(self, link: str | None) -> int | None:
         """Resolve a public Telegram group link once and cache its chat ID."""
@@ -68,23 +147,38 @@ class TdlibClient:
             return None
         if link in self._resolved_group_links:
             return self._resolved_group_links[link]
-        direct_match = re.search(r"(?:t\.me|telegram\.me)/c/(\d+)", link)
-        if direct_match:
-            chat_id = int(f"-100{direct_match.group(1)}")
-        else:
-            username_match = re.search(r"(?:t\.me|telegram\.me)/([A-Za-z0-9_]+)", link)
-            if not username_match:
-                chat_id = None
-            else:
-                entity = self._client.get_entity(username_match.group(1))
-                chat_id = getattr(entity, "id", None)
-        self._resolved_group_links[link] = chat_id
-        return chat_id
+        parsed = parse_group_link(link)
+        if parsed is None or parsed[0] == "id":
+            return self._remember_link(link, parsed[1] if parsed else None)
+        try:
+            entity = self._client.get_entity(parsed[1])
+        except (ValueError, BadRequestError):
+            self._remember_link(link, None)  # Telegram rejected it: never ask again
+            raise
+        return self._remember_link(link, getattr(entity, "id", None))
 
-    async def get_group_title_async(self, chat_id: int) -> str:
-        """Return a group title from an already-running asyncio loop."""
-        entity = await self._client.get_entity(chat_id)
-        return str(getattr(entity, "title", None) or getattr(entity, "first_name", None) or chat_id)
+    async def resolve_group_link_async(self, link: str | None) -> int | None:
+        """resolve_group_link from an already-running asyncio loop (same cache)."""
+        if not link:
+            return None
+        if link in self._resolved_group_links:
+            return self._resolved_group_links[link]
+        parsed = parse_group_link(link)
+        if parsed is None or parsed[0] == "id":
+            return self._remember_link(link, parsed[1] if parsed else None)
+        try:
+            entity = await self._client.get_entity(parsed[1])
+        except (ValueError, BadRequestError):
+            self._remember_link(link, None)
+            raise
+        return self._remember_link(link, getattr(entity, "id", None))
+
+    def _remember_link(self, link: str, chat_id: Any) -> int | None:
+        value = int(chat_id) if isinstance(chat_id, int) else None
+        self._resolved_group_links[link] = value
+        if self._cache:
+            self._cache.set_link(link, value)
+        return value
 
     async def close_async(self) -> None:
         """Close the client from an already-running asyncio event loop."""
@@ -97,24 +191,24 @@ class TdlibClient:
         if limit is not None and limit < 1:
             return
         for message in self._client.iter_messages(chat_id, limit=limit, min_id=min_id):
-            raw_message = message.to_dict()
-            reply_to = getattr(message, "reply_to", None)
-            yield {
-                "id": message.id,
-                "chat_id": chat_id,
-                "date": int(message.date.timestamp()) if isinstance(message.date, datetime) else None,
-                "message_user_id": message.sender_id,
-                "reply_to_message_id": getattr(reply_to, "reply_to_msg_id", None),
-                "edit_date": int(message.edit_date.timestamp()) if isinstance(message.edit_date, datetime) else None,
-                "views": message.views,
-                "forwards": message.forwards,
-                "media_type": type(message.media).__name__ if message.media is not None else "",
-                "raw_message_json": json.dumps(raw_message, default=str, ensure_ascii=False),
-                "content": {
-                    "@type": "messageText",
-                    "text": {"text": message.message or ""},
-                },
-            }
+            yield message_dict(message, chat_id)
+
+    async def iter_messages_async(
+        self, chat_id: int, limit: int | None = None, min_id: int = 0
+    ) -> AsyncIterator[dict[str, Any]]:
+        """iter_messages from an already-running asyncio loop (newest first)."""
+        if limit is not None and limit < 1:
+            return
+        async for message in self._client.iter_messages(chat_id, limit=limit, min_id=min_id):
+            yield message_dict(message, chat_id)
+
+    def on_new_message(self, chat_ids: tuple[int, ...], callback: Callable[[dict[str, Any]], None]) -> None:
+        """Call `callback` with every new message Telegram pushes for these chats (no polling)."""
+
+        async def handler(event: events.NewMessage.Event) -> None:
+            callback(message_dict(event.message, event.chat_id))
+
+        self._client.add_event_handler(handler, events.NewMessage(chats=list(chat_ids)))
 
     def close(self) -> None:
         """Close the client connection."""

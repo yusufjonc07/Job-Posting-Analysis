@@ -180,7 +180,7 @@ class CrawlerTestCase(unittest.TestCase):
             except KeyboardInterrupt:
                 self.fail("Ctrl+C escaped main() instead of stopping the loop cleanly")
         factory.assert_called_once_with(
-            api_id=0, api_hash="", phone_number="", database_directory=self.settings.tdlib_database_dir
+            api_id=0, api_hash="", phone_number="", database_directory=self.settings.tdlib_database_dir, cache=mock.ANY
         )
         return sleep
 

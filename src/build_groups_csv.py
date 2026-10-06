@@ -14,6 +14,8 @@ from telethon.tl.types import PeerChannel
 
 from config.settings import PROJECT_ROOT, settings
 from src.crawler.messages import extract_referenced_group_link, extract_referenced_group_name
+from src.main import EXIT_LOCKED, acquire_session_lock, lookup_cache
+from src.tdlib.cache import LookupCache
 from src.tdlib.client import TdlibClient
 
 OUTPUT_PATH = PROJECT_ROOT / "data" / "telegram_groups.csv"
@@ -129,8 +131,17 @@ def scan_raw_files(raw_dir: Path) -> dict[int, dict]:
     return groups
 
 
-def fetch_title(client: TdlibClient, group_id: int, raw_ids: set[int], links: set[str]) -> str | None:
-    """Look up a group title by ID, falling back to the links seen in its messages."""
+def fetch_title(client: TdlibClient, group_id: int, raw_ids: set[int], links: set[str], cache: LookupCache) -> str | None:
+    """A group title from the lookup cache, else Telegram (by ID, then by the links seen in its messages)."""
+    if cached := cache.title(group_id):
+        return cached
+    title = _request_title(client, group_id, raw_ids, links)
+    if title:
+        cache.set_title(group_id, title)
+    return title
+
+
+def _request_title(client: TdlibClient, group_id: int, raw_ids: set[int], links: set[str]) -> str | None:
     candidates: list = [PeerChannel(int(str(group_id).removeprefix("-100")))]
     candidates += [raw_id for raw_id in raw_ids if raw_id > 0]
     for candidate in candidates:
@@ -155,17 +166,23 @@ def fetch_title(client: TdlibClient, group_id: int, raw_ids: set[int], links: se
 
 def main() -> None:
     groups = scan_raw_files(settings.raw_data_dir)
+    lock = acquire_session_lock()
+    if lock is None:
+        print("A crawler or listener is using the Telegram session; stop it first.", file=sys.stderr)
+        raise SystemExit(EXIT_LOCKED)
+    cache = lookup_cache()
     client = TdlibClient(
         api_id=settings.telegram_api_id,
         api_hash=settings.telegram_api_hash,
         phone_number=settings.telegram_phone_number,
         database_directory=settings.tdlib_database_dir,
+        cache=cache,
     )
     client.start()
     rows = []
     try:
         for group_id, group in groups.items():
-            title = fetch_title(client, group_id, group["raw_ids"], group["links"])
+            title = fetch_title(client, group_id, group["raw_ids"], group["links"], cache)
             if title is None:
                 title = sorted(group["names"])[0] if group["names"] else ""
                 print(f"  {group_id}: not resolvable, using name from posts: {title!r}")
@@ -177,6 +194,7 @@ def main() -> None:
             })
     finally:
         client.close()
+        lock.close()
 
     if OUTPUT_PATH.exists():
         with OUTPUT_PATH.open(encoding="utf-8") as existing:

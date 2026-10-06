@@ -11,7 +11,7 @@ import os
 import pickle
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from watchfiles import watch
 
 from config.settings import PROJECT_ROOT
 from src.api import extract
@@ -34,6 +35,8 @@ CHUNK_BYTES = 1 << 20          # about 2,500 lines per process-pool task
 POOL_MIN_BYTES = 4 << 20       # a catch-up larger than this uses the process pool
 TAIL_BYTES = 64                # bytes before the read offset, to notice a rewritten file
 STATUS_INTERVAL = 1.0
+WATCH_DEBOUNCE_MS = 50         # changes within this window are read together
+WATCH_STEP_MS = 20
 KST_OFFSET_SECONDS = 9 * 3600
 
 PROVINCE_IDS = (
@@ -162,6 +165,13 @@ def read_groups_csv(path: Path) -> dict[int, dict]:
         return {int(row["group_id"]): row for row in csv.DictReader(source)}
 
 
+def display_title(name: str | None) -> str | None:
+    """A group name fit to show; placeholders like 'unknown' become 'Unknown group'."""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return "Unknown group" if name.strip().lower() == "unknown" else name.strip()
+
+
 def title_from_file(source_file: str) -> str:
     stem = source_file.removesuffix(".jsonl").removeprefix("group_")
     stem = stem.removeprefix("unmatched_")
@@ -176,7 +186,8 @@ def group_catalog(posts: pd.DataFrame, csv_rows: dict[int, dict], files: list[st
     for source_file in sorted(set(files) | set(posts["source_file"].unique())):
         group_id = group_id_from_source(source_file)
         row = csv_rows.get(group_id) if group_id is not None else None
-        title = (row or {}).get("group_title") or common.get(source_file) or title_from_file(source_file)
+        title = display_title((row or {}).get("group_title")) or display_title(common.get(source_file)) \
+            or display_title(title_from_file(source_file)) or source_file
         records.append({
             "source_file": source_file,
             "group_id": group_id,
@@ -282,7 +293,7 @@ class Store:
         return update
 
     def run(self, stop: threading.Event) -> None:
-        """Ingest-thread body: load, then poll every `poll_seconds` until `stop` is set."""
+        """Ingest-thread body: load, then read new lines whenever a raw file changes, until `stop` is set."""
         while not stop.is_set():
             try:
                 self.load()
@@ -292,13 +303,36 @@ class Store:
                 self.error = repr(error)
                 stop.wait(10)
         self.error = None
-        while not stop.wait(self.config.poll_seconds):
+        for _ in self._changes(stop):
             try:
                 self.poll()
             except Exception:
                 log.exception("poll failed")
         if self.dirty:
             self.save_cache(force=True)
+
+    def _changes(self, stop: threading.Event) -> Iterator[None]:
+        """Yields as soon as a .jsonl file in raw_dir changes, and at least every `poll_seconds` regardless."""
+        raw_dir = self.config.raw_dir
+        if self.config.watch_files and raw_dir.is_dir():
+            try:
+                for _ in watch(
+                    raw_dir,
+                    watch_filter=lambda _change, path: path.endswith(".jsonl"),
+                    debounce=WATCH_DEBOUNCE_MS,
+                    step=WATCH_STEP_MS,
+                    stop_event=stop,
+                    rust_timeout=max(1, int(self.config.poll_seconds * 1000)),
+                    yield_on_timeout=True,
+                    recursive=False,
+                    raise_interrupt=False,
+                ):
+                    yield
+                return
+            except Exception:
+                log.warning("file watching unavailable, checking every %s s instead", self.config.poll_seconds, exc_info=True)
+        while not stop.wait(self.config.poll_seconds):
+            yield
 
     def save_cache(self, force: bool = False) -> bool:
         """Write the snapshot to the cache directory (temp file + atomic replace)."""

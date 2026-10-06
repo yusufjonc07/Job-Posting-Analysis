@@ -39,6 +39,14 @@ export interface Filters {
 
 // ---- GET /api/health (never 503) ----
 
+/** The Telegram listener that writes new posts as Telegram pushes them (managed = started by the API). */
+export interface ListenerStatus {
+  state: 'disabled' | 'starting' | 'connecting' | 'catching_up' | 'listening' | 'restarting' | 'login_required' | 'external'
+  managed: boolean
+  restarts: number
+  messages_saved: number
+  last_message_at: string | null
+}
 export interface Health {
   status: 'loading' | 'ready'
   progress: number /*0..1*/
@@ -48,6 +56,7 @@ export interface Health {
   files: number
   last_update: string | null /*ISO time of last ingest that added rows*/
   last_post: string | null /*max post date*/
+  listener?: ListenerStatus
 }
 
 // ---- GET /api/meta ----

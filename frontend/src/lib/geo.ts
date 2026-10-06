@@ -19,4 +19,4 @@ export type ProvinceFeature = Feature<Polygon | MultiPolygon, ProvinceProps>
 /** All 17 provinces in backend order. */
 export const provinceGeo = raw as unknown as FeatureCollection<Polygon | MultiPolygon, ProvinceProps>
 
-export const BOUNDARIES_CREDIT = 'Boundaries: KOSTAT 2013'
+export { BOUNDARIES_CREDIT } from './constants'

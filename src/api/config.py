@@ -22,6 +22,8 @@ class ApiConfig:
     workers: int = max((os.cpu_count() or 2) - 1, 1)
     save_interval: float = 60.0
     use_cache: bool = True
+    watch_files: bool = True
+    telegram_listener: bool = False
 
 
 def resolve_path(value: str | None, default: Path) -> Path:
@@ -32,6 +34,12 @@ def resolve_path(value: str | None, default: Path) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
+def flag(value: str | None, default: bool) -> bool:
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 def load_config() -> ApiConfig:
     """Read the API_* variables (and RAW_DATA_DIR) from the environment."""
     origins = os.getenv("API_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)
@@ -40,6 +48,7 @@ def load_config() -> ApiConfig:
         raw_dir=resolve_path(os.getenv("RAW_DATA_DIR"), PROJECT_ROOT / "data" / "raw"),
         cache_dir=resolve_path(os.getenv("API_CACHE_DIR"), PROJECT_ROOT / "data" / "cache"),
         poll_seconds=float(os.getenv("API_POLL_SECONDS", "2") or 2),
+        telegram_listener=flag(os.getenv("API_TELEGRAM_LISTENER"), default=True),
         cors_origins=tuple(origin.strip() for origin in origins.split(",") if origin.strip()),
         workers=max(int(workers), 1) if workers else max((os.cpu_count() or 2) - 1, 1),
     )

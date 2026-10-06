@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import re
+from pathlib import Path
 from typing import Any
 
 
@@ -82,3 +83,10 @@ def group_filename(group_name: str) -> str:
     safe_name = re.sub(r"[^\w\s-]", "", group_name, flags=re.UNICODE)
     safe_name = re.sub(r"[\s-]+", "_", safe_name).strip("_")
     return (safe_name or "unknown_group")[:100]
+
+
+def output_path(raw_dir: Path, referenced_group_id: int | None, referenced_group: str | None) -> Path:
+    """The JSONL file a post belongs in: its resolved group, else an unmatched file named after the group."""
+    if referenced_group_id is None:
+        return raw_dir / f"group_unmatched_{group_filename(referenced_group or 'unknown')}.jsonl"
+    return raw_dir / f"group_{referenced_group_id}.jsonl"

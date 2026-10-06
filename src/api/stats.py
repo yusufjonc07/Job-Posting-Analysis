@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from src.api.extract import OCCUPATION_NAMES, VISA_TYPES, decode_mask
-from src.api.store import KST_OFFSET_SECONDS, PERIODS, PROVINCE_IDS, SCRIPTS, Snapshot
+from src.api.store import KST_OFFSET_SECONDS, PERIODS, PROVINCE_IDS, SCRIPTS, Snapshot, display_title
 from src.utils.salary import PERIOD_RANGES
 
 PROVINCE_NAMES_KO = {
@@ -181,7 +181,7 @@ def feed_items(ads: pd.DataFrame, groups: pd.DataFrame, limit: int) -> list[dict
     titles = groups["title"]
     items = []
     for row in newest.itertuples(index=False):
-        forwarded_from = row.group_name if row.is_forwarded and isinstance(row.group_name, str) else None
+        forwarded_from = display_title(row.group_name) if row.is_forwarded else None
         title = forwarded_from or titles.get(row.source_file, row.source_file)
         period = row.salary_period if isinstance(row.salary_period, str) else None
         items.append({

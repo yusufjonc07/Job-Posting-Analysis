@@ -47,6 +47,9 @@ export const SOURCE_LABELS: Record<LocationSource, string> = {
   unknown: 'No location',
 }
 
+/** Source credit for the province boundaries. */
+export const BOUNDARIES_CREDIT = 'Boundaries: KOSTAT 2013'
+
 /** Copy used wherever volume over time is shown. */
 export const FORWARDED_NOTE =
   "Forwarded posts from the Ish e'lonlari bot only exist from Aug 2026 — the jump is a data-source change, not job growth."

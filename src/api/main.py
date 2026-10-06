@@ -23,6 +23,7 @@ from src.api import stats
 from src.api.config import ApiConfig, load_config
 from src.api.events import Broadcaster
 from src.api.store import PROVINCE_IDS, Snapshot, Store
+from src.api.telegram import ListenerSupervisor
 
 log = logging.getLogger("src.api")
 
@@ -105,10 +106,14 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
     broadcaster = Broadcaster()
     cache = StatsCache()
     log_progress = progress_logger()
+    listener = ListenerSupervisor(config.raw_dir, enabled=config.telegram_listener)
+
+    def full_health(health: dict) -> dict:
+        return {**health, "listener": listener.status()}
 
     def on_status(health: dict) -> None:
         log_progress(health)
-        broadcaster.publish("status", health)
+        broadcaster.publish("status", full_health(health))
 
     def on_update(update: dict) -> None:
         log.info("+%d posts (+%d new ads), version %d", update["added_posts"], update["added_ads"], update["version"])
@@ -124,16 +129,21 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
         thread = threading.Thread(target=store.run, args=(stop,), name="ingest", daemon=True)
         log.info("reading %s (cache %s)", config.raw_dir, config.cache_dir)
         thread.start()
+        listener.start()
+        if not config.telegram_listener:
+            log.info("Telegram listener off (API_TELEGRAM_LISTENER=0): new posts appear when a crawler writes them")
         try:
             yield
         finally:
             broadcaster.close()
+            await listener.stop()
             stop.set()
             await asyncio.to_thread(thread.join, SHUTDOWN_SECONDS)
 
     app = FastAPI(title="Job ads live dashboard", lifespan=lifespan)
     app.state.store = store
     app.state.broadcaster = broadcaster
+    app.state.listener = listener
     app.add_middleware(CORSMiddleware, allow_origins=list(config.cors_origins), allow_methods=["GET"], allow_headers=["*"])
 
     @app.exception_handler(StoreLoading)
@@ -167,7 +177,7 @@ def create_app(config: ApiConfig | None = None, now: Callable[[], datetime] = st
 
     @app.get("/api/health")
     def health() -> dict:
-        return store.health()
+        return full_health(store.health())
 
     @app.get("/api/meta")
     def meta(current: Ready) -> dict:

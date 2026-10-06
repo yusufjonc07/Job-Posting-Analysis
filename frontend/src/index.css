@@ -31,6 +31,18 @@
   --animate-slide-in: slide-in 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
   --animate-fade-in: fade-in 0.25s ease-out both;
   --animate-toast-in: toast-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  --animate-region-pulse: region-pulse 1.4s ease-out 2 both;
+
+  @keyframes region-pulse {
+    0% {
+      stroke-width: 2px;
+      stroke-opacity: 0.95;
+    }
+    100% {
+      stroke-width: 14px;
+      stroke-opacity: 0;
+    }
+  }
 
   @keyframes pulse-ring {
     0% {
